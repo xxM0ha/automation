@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+backend/venv/
+venv/
+env/
+
+# Django
+backend/*.sqlite3
+backend/db.sqlite3
+*.sqlite3
+backend/staticfiles/
+backend/media/
+
+# Environment / secrets
+backend/.env
+.env
+
+# Playwright sessions & recordings
+backend/integrations/laffe/sessions/
+backend/logs/
+backend/foodics_recorded.py
+backend/record_foodics.py
+
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.local
+
+# Misc
+.DS_Store
+Thumbs.db
+*.log

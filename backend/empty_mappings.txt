@@ -1,0 +1,127 @@
+
+[الوجبات الرئيسية]
+  تويستر: lezzo
+  تويستر رانش: lezzo
+  ريزو: tiptop / lezzo
+  زنجر: lezzo
+  شاورما: lezzo
+  هني مسترد تندرز: tiptop / lezzo
+
+[البوكسات]
+  كل يوم بوكس: toters / tiptop / yammak / lezzo
+  لفي بوكس: toters / tiptop / yammak / lezzo
+
+[البركر]
+  اكستريم بركر: tiptop / lezzo
+  بركر بوب: tiptop / lezzo
+  بركر لفي: tiptop / lezzo
+  تشيز بركر: tiptop / lezzo
+  سبيل موتزيريلا بركر: tiptop / lezzo
+  سويت جلي جكن: toters / tiptop / yammak / lezzo
+  كلاسك بركر: tiptop / lezzo
+  كوينز بركر: tiptop / lezzo
+  مكسيكان بركر: tiptop / lezzo
+
+[البركر دبل]
+  اكستريم بركر دبل: toters / tiptop / yammak / lezzo
+  بركر لفي دبل: toters / tiptop / yammak / lezzo
+  بوب بركر دبل: toters / tiptop / yammak / lezzo
+  تشيز بركر دبل: toters / tiptop / yammak / lezzo
+  سبيل موتزيريلا بركر دبل: toters / tiptop / yammak / lezzo
+  سويت جلي جكن دبل: toters / tiptop / yammak / lezzo
+  كلاسك بركر دبل: toters / tiptop / yammak / lezzo
+  كوينز بركر دبل: toters / tiptop / yammak / lezzo
+  مكسيكان بركر دبل: toters / tiptop / yammak / lezzo
+
+[الوجبات]
+  وجبة اكستريم بركر: tiptop / yammak / lezzo
+  وجبة بركر بوب: tiptop / yammak / lezzo
+  وجبة بركر لفي: tiptop / yammak / lezzo
+  وجبة تشيز بركر: tiptop / yammak / lezzo
+  وجبة سبيل موتزيريلا بركر: toters / tiptop / yammak / lezzo
+  وجبة كلاسيك بركر: tiptop / yammak / lezzo
+  وجبة كوينز بركر: tiptop / yammak / lezzo
+  وجبة مكسيكان بركر: tiptop / yammak / lezzo
+
+[الدايت]
+  بركر دجاج دايت: lezzo
+  بركر دجاج دايت دبل: toters / yammak / lezzo
+  بركر لحم دايت: tiptop / lezzo
+  بركر لحم دايت دبل: toters / tiptop / yammak / lezzo
+  دايت كاري 100غ: toters / tiptop / yammak
+  دايت كاري 150غ: toters / tiptop / yammak
+  دايت كاري 200غ: toters / tiptop / yammak
+  ستيك دجاج عادي: lezzo
+  ستيك دجاج كاري: lezzo
+  ستيك لحم دايت: yammak / lezzo
+  وجبة دايت 100غ: toters / tiptop / yammak
+  وجبة دايت 150غ: toters / tiptop / yammak
+  وجبة دايت 200غ: toters / tiptop / yammak
+
+[الفرايز]
+  كل يوم فرايز: toters / yammak
+  لفي فرايز: toters / yammak
+
+[المقبلات والإضافات]
+  اصابع بطاطس: toters / tiptop / lezzo
+  حمص بطحينة: yammak
+  فنكر: tiptop / lezzo
+  فنكر ب الجبن: tiptop
+  كومبو رز (بطاطا + ببسي): toters / tiptop / yammak / lezzo
+  كومبو(بطاطا + ببسي): toters / tiptop / yammak / lezzo
+  ورق عنب صغير: toters / tiptop / yammak / lezzo
+  ورق عنب كبير: toters / tiptop / yammak / lezzo
+
+[المشروبات]
+  ديو: toters / tiptop / yammak / lezzo
+  سفن: toters / tiptop / yammak / lezzo
+  سفن دايت: toters / tiptop / yammak / lezzo
+  شنينة (لبن): toters / tiptop / yammak
+  ماء: tiptop
+  ميرنده: toters / tiptop / yammak / lezzo
+
+[الصلصات والإضافات]
+  جبن سائل: toters / tiptop / yammak / lezzo
+  سكوب كولسلو: toters / tiptop / yammak / lezzo
+  سكوب هالبينو: yammak
+  صلصة باربكيو: yammak
+  صلصة بانك بانك: toters / tiptop / yammak / lezzo
+  صلصة بوب: yammak
+  صلصة ريزو: yammak
+  صلصة طرطور: yammak
+  صلصة كاري: yammak
+  صلصة كوكتيل: yammak
+  صلصة كوينز: yammak
+  صلصة ماكسكان: yammak
+  صلصة هني ماسترد: yammak
+  صلصلة ثومية: yammak
+  صوص ستيك عادي: yammak
+  صوص ستيك لحم: yammak
+  كاتشاب: toters / tiptop / yammak / lezzo
+
+[الريزو]
+  بوكس رِز (4 انواع رز +انواع صلصات): toters / tiptop
+  جلي ريزو (صلصة ماكسيكان): toters / tiptop
+  جيز ريزو (جبن): tiptop
+  رِز ريزو (صلصة بوب): tiptop
+  كلاسيك ريزو (كوكتيل): tiptop / lezzo
+  كلاودي ريزو (صلصة رانش): tiptop
+  هني ماسترد ريزو (صلصة هني ماسترد): tiptop / lezzo
+
+[وجبات الريزو]
+  وجبة جلي ريزو (صلصة ماكسيكان): tiptop / lezzo
+  وجبة جيز ريزو (جبن): tiptop / yammak / lezzo
+  وجبة رِز ريزو (صلصة بوب): tiptop / lezzo
+  وجبة كلاسيك ريزو (كوكتيل): tiptop / lezzo
+  وجبة كلاودي ريزو (صلصة رانش): tiptop / lezzo
+  وجبة هني ماسترد ريزو (صلصة هني ماسترد): tiptop / lezzo
+
+[صلصات الريزو]
+  صوص جلي ريزو: tiptop / yammak
+  صوص جيز: tiptop / yammak
+  صوص رانش: tiptop / yammak
+  صوص رز ريزو: tiptop / yammak
+  صوص كلاسك كوكتيل: tiptop / yammak
+  صوص هني مسترد: tiptop / yammak
+
+Total items with gaps: 99
