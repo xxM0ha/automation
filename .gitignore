@@ -13,26 +13,21 @@ backend/venv/
 venv/
 env/
 
+# Node / frontend build artifacts
+frontend/node_modules/
+frontend/dist/
+
 # Django
-backend/*.sqlite3
-backend/db.sqlite3
-*.sqlite3
 backend/staticfiles/
 backend/media/
 
-# Environment / secrets
-backend/.env
-.env
-
-# Playwright sessions & recordings
-backend/integrations/laffe/sessions/
-backend/logs/
+# Playwright recordings
 backend/foodics_recorded.py
 backend/record_foodics.py
+backend/foodics_trace.zip
+backend/logs/
 
-# Node / frontend
-frontend/node_modules/
-frontend/dist/
+# Frontend env
 frontend/.env
 frontend/.env.local
 
