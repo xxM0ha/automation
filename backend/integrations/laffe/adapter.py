@@ -237,7 +237,7 @@ class LaffeAdapter(BasePOSAdapter):
         for item in (items or []):
             for _qty_i in range(item.qty):
                 try:
-                    page.get_by_text(item.name_snapshot, exact=True).first.click()
+                    page.get_by_text(item.name_snapshot, exact=True).first.click(timeout=5_000)
                     for confirm_label in ['إضافة', 'إضافة إلى الطلب', 'تأكيد', 'موافق']:
                         try:
                             btn = page.get_by_role('button', name=confirm_label).first
