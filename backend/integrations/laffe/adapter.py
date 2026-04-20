@@ -237,13 +237,13 @@ class LaffeAdapter(BasePOSAdapter):
             for _qty_i in range(item.qty):
                 try:
                     page.get_by_text(item.name_snapshot, exact=True).first.click()
-                    page.wait_for_timeout(600)
+                    page.wait_for_timeout(1_200)
                     for confirm_label in ['إضافة', 'إضافة إلى الطلب', 'تأكيد', 'موافق']:
                         try:
                             btn = page.get_by_role('button', name=confirm_label)
-                            if btn.first.is_visible(timeout=1_000):
+                            if btn.first.is_visible(timeout=2_000):
                                 btn.first.click()
-                                page.wait_for_timeout(400)
+                                page.wait_for_timeout(800)
                                 break
                         except Exception:
                             continue
@@ -257,9 +257,18 @@ class LaffeAdapter(BasePOSAdapter):
         if order.notes:
             kitchen_notes += f'\n{order.notes}'
         try:
-            notes_field = page.get_by_role('textbox', name='ملاحظات المطبخ*')
-            notes_field.click()
-            notes_field.fill(kitchen_notes)
+            notes_field = None
+            for notes_label in ['ملاحظات المطبخ*', 'ملاحظات المطبخ', 'ملاحظات', 'notes']:
+                try:
+                    f = page.get_by_role('textbox', name=notes_label)
+                    if f.first.is_visible(timeout=1_500):
+                        notes_field = f.first
+                        break
+                except Exception:
+                    continue
+            if notes_field:
+                notes_field.click()
+                notes_field.fill(kitchen_notes)
         except Exception:
             snap('5_notes_failed')
             logger.warning('[laffe] Could not fill notes for order %s', oid)
