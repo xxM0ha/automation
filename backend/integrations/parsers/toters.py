@@ -21,12 +21,12 @@ _SUBTOTAL_PAT   = re.compile(r'^IQD\s*[\d,٬٠-٩]+$')
 _ITEM_COUNT_PAT = re.compile(r'^[٠-٩\d]+\s*عناصر?$')
 _TIME_LEFT_PAT  = re.compile(r'^لديك\s')
 
-_END_MARKERS = {'أكد الطلب'}
+_END_MARKERS = set()  # No hard stop — deduplication handles repeated order blocks
 
 _SKIP_TOKENS = re.compile(
     r'^(تم|هوية|اليوم في|أكد الطلب|فتح لائحة التنقل|الطلبات الحالية|'
     r'Toters Merchant|جديد|تحضير|جاهز|لا توجد طلبات جديدة|تم التأكيد|'
-    r'حاصل الجمع|مجموع|ملف)'
+    r'حاصل الجمع|مجموع|ملف|%full_order|New)'
 )
 
 
@@ -112,6 +112,15 @@ def parse(raw_text: str) -> dict:
 
     if current:
         _flush(current, notes_buf)
+
+    # Deduplicate by item name — keep first occurrence only
+    seen = set()
+    unique_items = []
+    for it in items:
+        if it['name'] not in seen:
+            seen.add(it['name'])
+            unique_items.append(it)
+    items = unique_items
 
     total = sum(it['qty'] * it['unit_price'] for it in items)
 
