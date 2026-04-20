@@ -226,8 +226,6 @@ class LaffeAdapter(BasePOSAdapter):
                     break
                 except Exception:
                     continue
-            # Wait for items to load instead of fixed sleep
-            page.wait_for_selector('text=' + menu_category, timeout=6_000)
             page.wait_for_timeout(500)
             snap('3_after_category')
             logger.debug('[laffe] Menu category opened: %s', menu_category)
