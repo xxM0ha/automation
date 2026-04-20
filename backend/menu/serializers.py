@@ -34,17 +34,16 @@ class MenuItemSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         platform_ids = self.initial_data.get('platforms', [])
-        platform_names = self.initial_data.get('platformNames', {})
+        platform_names = self.initial_data.get('platform_names', {})
         item = super().create(validated_data)
         self._save_platform_mappings(item, platform_ids, platform_names)
         return item
 
     def update(self, instance, validated_data):
         platform_ids = self.initial_data.get('platforms', [])
-        platform_names = self.initial_data.get('platformNames', {})
+        platform_names = self.initial_data.get('platform_names', {})
         item = super().update(instance, validated_data)
-        if platform_ids:
-            self._save_platform_mappings(item, platform_ids, platform_names)
+        self._save_platform_mappings(item, platform_ids, platform_names)
         return item
 
     def _save_platform_mappings(self, item, platform_ids, platform_names):
