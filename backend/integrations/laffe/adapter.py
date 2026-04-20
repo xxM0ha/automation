@@ -207,11 +207,12 @@ class LaffeAdapter(BasePOSAdapter):
         # Save order setup
         try:
             page.get_by_role('button', name='حفظ').click(force=True)
-            page.wait_for_timeout(3_000)
+            # Wait for menu categories to appear instead of fixed sleep
+            page.wait_for_selector('div.menu-category, [class*="category"], .item-category', timeout=8_000)
             snap('2_after_save')
         except Exception as e:
-            snap('2_save_failed')
-            raise RuntimeError(f'[laffe] حفظ click failed for {oid}: {e}') from e
+            page.wait_for_timeout(2_000)
+            snap('2_after_save')
 
         # Open menu category
         menu_category = self._menu_category(order)
@@ -225,7 +226,9 @@ class LaffeAdapter(BasePOSAdapter):
                     break
                 except Exception:
                     continue
-            page.wait_for_timeout(3_000)
+            # Wait for items to load instead of fixed sleep
+            page.wait_for_selector('text=' + menu_category, timeout=6_000)
+            page.wait_for_timeout(500)
             snap('3_after_category')
             logger.debug('[laffe] Menu category opened: %s', menu_category)
         except Exception as e:
@@ -237,14 +240,14 @@ class LaffeAdapter(BasePOSAdapter):
             for _qty_i in range(item.qty):
                 try:
                     page.get_by_text(item.name_snapshot, exact=True).first.click()
-                    page.wait_for_timeout(1_200)
                     for confirm_label in ['إضافة', 'إضافة إلى الطلب', 'تأكيد', 'موافق']:
                         try:
-                            btn = page.get_by_role('button', name=confirm_label)
-                            if btn.first.is_visible(timeout=2_000):
-                                btn.first.click()
-                                page.wait_for_timeout(800)
-                                break
+                            btn = page.get_by_role('button', name=confirm_label).first
+                            btn.wait_for(state='visible', timeout=4_000)
+                            btn.click()
+                            # Wait for modal to close
+                            btn.wait_for(state='hidden', timeout=3_000)
+                            break
                         except Exception:
                             continue
                 except Exception:
