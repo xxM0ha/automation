@@ -236,7 +236,10 @@ class LaffeAdapter(BasePOSAdapter):
         # Add each item
         for item in (items or []):
             try:
+                # Try exact match first, fall back to contains (handles APP suffix in RIZ menu)
                 el = page.get_by_text(item.name_snapshot, exact=True).first
+                if not el.is_visible(timeout=2_000):
+                    el = page.get_by_text(item.name_snapshot, exact=False).first
                 el.scroll_into_view_if_needed(timeout=5_000)
                 el.click(timeout=5_000)
                 page.wait_for_timeout(800)
