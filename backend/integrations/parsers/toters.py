@@ -1,43 +1,53 @@
 """
 Toters order parser.
 
-Raw text is a long Arabic string with tokens separated by ' — '.
+Handles two raw-text formats (both are copied from the Toters merchant app):
 
-Example structure:
+Format A — dash-separated (old):
   الطلب #٦٦٠ — ريمان باسل صديق R — هوية … — تم — اليوم في … — ٣ عناصر
   — الريزو — ٣x — ريزو كلاسيك — IQD ٦٬٢٥٠ / عنصر — IQD ١٨٬٧٥٠
-  — المشروبات — ١x — مشروبات غازية — IQD ٧٥٠ / عنصر — اختر المشروب الغازي — ميرندا — IQD ٧٥٠
   — لديك ٢٨:١٤ دقيقة متبقية للإرسال. — أكد الطلب
 
-Item layout (per item):
-  [optional category] Nx item_name IQD_unit_price IQD_subtotal [optional modifiers…]
+Format B — comma-separated (new):
+  فتح لائحة التنقل,الطلبات الحالية,...,#٢٢٠ موجود الآن في صفحة التحضير.,ملف ١,
+  الريزو,١x,ريزو هني ماسترد,‏IQD ٧٬٥٠٠ / عنصر,IQD ٧٬٥٠٠,...,أكد الطلب
 """
 import re
 from .common import ar_to_en_digits, parse_price, parse_qty
 
-_ORDER_ID_PAT   = re.compile(r'الطلب\s*#([٠-٩\d]+)')
+_ORDER_ID_PAT   = re.compile(r'(?:الطلب\s*)?#([٠-٩\d]+)')
 _UNIT_PRICE_PAT = re.compile(r'^IQD\s*[\d,٬٠-٩]+\s*/\s*عنصر$')
 _SUBTOTAL_PAT   = re.compile(r'^IQD\s*[\d,٬٠-٩]+$')
 _ITEM_COUNT_PAT = re.compile(r'^[٠-٩\d]+\s*عناصر?$')
 _TIME_LEFT_PAT  = re.compile(r'^لديك\s')
 
-# Tokens that signal "we are past the items section"
-_END_MARKERS = {'أكد الطلب', 'لديك'}
+_END_MARKERS = {'أكد الطلب'}
 
-# Tokens to skip entirely in the header section
-_HEADER_SKIP = re.compile(
-    r'^(تم|هوية|اليوم في|أكد الطلب)|(^لديك\s)'
+_SKIP_TOKENS = re.compile(
+    r'^(تم|هوية|اليوم في|أكد الطلب|فتح لائحة التنقل|الطلبات الحالية|'
+    r'Toters Merchant|جديد|تحضير|جاهز|لا توجد طلبات جديدة|تم التأكيد|'
+    r'حاصل الجمع|مجموع|ملف)'
 )
 
 
+def _tokenize(raw_text: str) -> list[str]:
+    # Strip RTL / LTR marks and extra whitespace from every token
+    def clean(t):
+        return t.replace('\u200f', '').replace('\u200e', '').strip()
+
+    if ' — ' in raw_text:
+        return [clean(t) for t in raw_text.split(' — ') if clean(t)]
+    return [clean(t) for t in raw_text.split(',') if clean(t)]
+
+
 def parse(raw_text: str) -> dict:
-    tokens = [t.strip() for t in raw_text.split(' — ') if t.strip()]
+    tokens = _tokenize(raw_text)
 
     external_id   = ''
     customer_name = ''
     items         = []
 
-    # ── Pass 1: extract order ID and customer name ────────────────────────────
+    # ── Pass 1: extract order ID and customer name (dash format only) ─────────
     id_idx = -1
     for i, tok in enumerate(tokens):
         m = _ORDER_ID_PAT.search(tok)
@@ -46,13 +56,10 @@ def parse(raw_text: str) -> dict:
             id_idx = i
             break
 
-    if id_idx >= 0:
-        # The token immediately after the order-ID token is the customer name,
-        # as long as it isn't a known skip token.
+    if id_idx >= 0 and ' — ' in raw_text:
         for j in range(id_idx + 1, len(tokens)):
             cand = tokens[j]
-            if (cand.startswith('هوية')
-                    or cand.startswith('اليوم')
+            if (cand.startswith('هوية') or cand.startswith('اليوم')
                     or cand == 'تم'
                     or _ITEM_COUNT_PAT.match(ar_to_en_digits(cand))):
                 break
@@ -60,9 +67,6 @@ def parse(raw_text: str) -> dict:
             break
 
     # ── Pass 2: extract items ─────────────────────────────────────────────────
-    # State machine:
-    #   looking   → scanning for a qty token
-    #   have_name → consumed qty+name, looking for unit price / modifiers
     current: dict | None = None
     notes_buf: list[str] = []
 
@@ -72,43 +76,37 @@ def parse(raw_text: str) -> dict:
         items.append(item)
 
     for tok in tokens:
-        # Hard stop
         if tok in _END_MARKERS or _TIME_LEFT_PAT.match(tok):
             break
 
-        # Quantity token  (e.g. ٣x or 3x)
+        if _SKIP_TOKENS.match(tok):
+            continue
+
         en_tok = ar_to_en_digits(tok)
         qty_val = _parse_qty_token(en_tok)
         if qty_val is not None:
             if current is not None:
                 _flush(current, notes_buf)
                 notes_buf = []
-            # Next token will be item name — look ahead is handled by state
             current = {'name': '', 'qty': qty_val, 'unit_price': 0.0}
-            # Mark that the NEXT non-special token is the item name
             current['_awaiting_name'] = True
             continue
 
-        # Awaiting item name
         if current and current.get('_awaiting_name'):
             current['name'] = tok
             del current['_awaiting_name']
             continue
 
-        # Unit price  (IQD X / عنصر)
         if current and _UNIT_PRICE_PAT.match(tok):
             current['unit_price'] = parse_price(tok)
             continue
 
-        # Per-item subtotal  (IQD X)  — skip
         if current and _SUBTOTAL_PAT.match(tok):
             continue
 
-        # Item-count header token  (e.g. ٣ عناصر) — skip
         if _ITEM_COUNT_PAT.match(ar_to_en_digits(tok)):
             continue
 
-        # Anything else while we have an active item = modifier note
         if current and not current.get('_awaiting_name'):
             notes_buf.append(tok)
 
@@ -129,6 +127,5 @@ def parse(raw_text: str) -> dict:
 
 
 def _parse_qty_token(en_tok: str) -> int | None:
-    """Return qty if token is exactly '<digits>x' (case-insensitive x)."""
     m = re.match(r'^(\d+)[xX×]$', en_tok)
     return int(m.group(1)) if m else None
