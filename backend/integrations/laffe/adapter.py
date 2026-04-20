@@ -236,7 +236,9 @@ class LaffeAdapter(BasePOSAdapter):
         # Add each item
         for item in (items or []):
             try:
-                page.get_by_text(item.name_snapshot, exact=True).first.click(timeout=5_000)
+                el = page.get_by_text(item.name_snapshot, exact=True).first
+                el.scroll_into_view_if_needed(timeout=5_000)
+                el.click(timeout=5_000)
                 page.wait_for_timeout(800)
 
                 # Check if a modal opened (has a confirm button)
@@ -263,7 +265,9 @@ class LaffeAdapter(BasePOSAdapter):
 
                 if not modal_open and item.qty > 1:
                     for _ in range(item.qty - 1):
-                        page.get_by_text(item.name_snapshot, exact=True).first.click(timeout=5_000)
+                        el = page.get_by_text(item.name_snapshot, exact=True).first
+                        el.scroll_into_view_if_needed(timeout=5_000)
+                        el.click(timeout=5_000)
                         page.wait_for_timeout(400)
 
             except Exception:
