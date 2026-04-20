@@ -248,7 +248,7 @@ class LaffeAdapter(BasePOSAdapter):
                             modal_open = True
                             # Set qty using الكمية + button (top-right of modal)
                             if item.qty > 1:
-                                qty_plus = page.locator('[class*="quantity"] button, [class*="qty"] button').filter(has_text='+').first
+                                qty_plus = page.locator('[id="item.increase"]')
                                 for _ in range(item.qty - 1):
                                     try:
                                         qty_plus.click(timeout=1_000)
