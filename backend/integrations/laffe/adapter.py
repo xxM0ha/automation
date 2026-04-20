@@ -136,8 +136,10 @@ class LaffeAdapter(BasePOSAdapter):
         logger.info('[laffe] Pushing order %s (queued)', order.external_id)
 
         try:
+            # Pre-fetch items in the Django thread before entering the Playwright thread
+            items = list(order.order_items.all())
             worker = get_worker(self.restaurant.id)
-            pos_id = worker.submit(lambda page: self._fill_order(page, order))
+            pos_id = worker.submit(lambda page: self._fill_order(page, order, items))
             return POSResult(ok=True, external_id=pos_id)
 
         except Exception as e:
@@ -145,56 +147,133 @@ class LaffeAdapter(BasePOSAdapter):
             logger.exception('[laffe] push_order failed for %s', order.external_id)
             return POSResult(ok=False, error=str(e))
 
-    def _fill_order(self, page, order) -> str:
+    def _branch_name(self, order=None) -> str:
+        src = (order.raw_payload.get('source_restaurant', '') if order else '') or self.restaurant.slug
+        src = src.lower()
+        if any(k in src for k in ('ziraee', 'زراعي', 'zira')):
+            return 'الزراعي'
+        return 'المصارف'
+
+    def _menu_category(self, order=None) -> str:
+        src = (order.raw_payload.get('source_restaurant', '') if order else '') or self.restaurant.slug
+        src = src.lower()
+        if any(k in src for k in ('riz', 'رز', 'rice')):
+            return 'منيو تطبيقات RIZ'
+        return 'منيو التطبيقات'
+
+    def _fill_order(self, page, order, items=None) -> str:
         """
         Fill the order form in Foodics.
         At entry: page is at idle state (pickup selected, توترز chosen).
         At exit: order is saved, Foodics order ID returned.
         """
+        oid = order.external_id
+
+        def snap(label: str) -> None:
+            try:
+                path = FAILURE_DIR / f'{oid}_{label}.png'
+                page.screenshot(path=str(path))
+                logger.info('[laffe] Screenshot: %s', path)
+            except Exception:
+                pass
+
         # Select branch
-        branch_name = self.credentials.get('branch_name', 'المصارف')
-        page.locator("div").filter(has_text="اختر").nth(1).click()
-        page.locator("a").filter(has_text=branch_name).first.click()
-        logger.debug('[laffe] Branch selected: %s', branch_name)
+        branch_name = self._branch_name(order)
+        try:
+            page.evaluate("""() => {
+                const triggers = document.querySelectorAll('div.input.cursor-pointer');
+                for (const el of triggers) {
+                    if (el.textContent.trim() === 'اختر') {
+                        el.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
+                        el.click();
+                        el.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
+                        break;
+                    }
+                }
+            }""")
+            search = page.get_by_placeholder('ابدأ الكتابة للبحث')
+            search.wait_for(state='visible', timeout=5_000)
+            search.fill(branch_name)
+            page.wait_for_timeout(800)
+            option = page.locator('#app-teleport a').filter(has_text=branch_name).first
+            option.wait_for(state='visible', timeout=5_000)
+            option.click()
+            page.wait_for_timeout(500)
+            logger.debug('[laffe] Branch selected: %s', branch_name)
+        except Exception as e:
+            snap('1_branch_failed')
+            raise RuntimeError(f'[laffe] Branch selection failed for {oid}: {e}') from e
 
-        # Save the customer / order setup form
-        page.get_by_role("button", name="حفظ").click()
-        page.wait_for_timeout(1_000)
+        # Save order setup
+        try:
+            page.get_by_role('button', name='حفظ').click(force=True)
+            page.wait_for_timeout(3_000)
+            snap('2_after_save')
+        except Exception as e:
+            snap('2_save_failed')
+            raise RuntimeError(f'[laffe] حفظ click failed for {oid}: {e}') from e
 
-        # Open the menu
-        page.locator("div").filter(has_text="منيو التطبيقات").nth(2).click()
-        page.wait_for_timeout(500)
+        # Open menu category
+        menu_category = self._menu_category(order)
+        try:
+            for attempt in [
+                lambda: page.get_by_text(menu_category, exact=True).first.click(timeout=8_000, force=True),
+                lambda: page.locator('div').filter(has_text=menu_category).nth(2).click(timeout=8_000, force=True),
+            ]:
+                try:
+                    attempt()
+                    break
+                except Exception:
+                    continue
+            page.wait_for_timeout(3_000)
+            snap('3_after_category')
+            logger.debug('[laffe] Menu category opened: %s', menu_category)
+        except Exception as e:
+            snap('3_menu_category_failed')
+            raise RuntimeError(f'[laffe] Menu category click failed for {oid}: {e}') from e
 
         # Add each item
-        for item in order.order_items.all():
-            try:
-                page.get_by_text(item.name_snapshot, exact=True).click()
-                page.wait_for_timeout(300)
-                # Close item modifier modal if it appears
+        for item in (items or []):
+            for _qty_i in range(item.qty):
                 try:
-                    page.get_by_role("button", name="close").click()
-                    page.wait_for_timeout(300)
+                    page.get_by_text(item.name_snapshot, exact=True).first.click()
+                    page.wait_for_timeout(600)
+                    for confirm_label in ['إضافة', 'إضافة إلى الطلب', 'تأكيد', 'موافق']:
+                        try:
+                            btn = page.get_by_role('button', name=confirm_label)
+                            if btn.first.is_visible(timeout=1_000):
+                                btn.first.click()
+                                page.wait_for_timeout(400)
+                                break
+                        except Exception:
+                            continue
                 except Exception:
-                    pass
-                logger.debug('[laffe] Added item: %s x%s', item.name_snapshot, item.qty)
-            except Exception:
-                logger.warning('[laffe] Could not find item in Foodics menu: %s', item.name_snapshot)
+                    snap(f'4_item_failed_{item.name_snapshot[:20]}')
+                    logger.warning('[laffe] Could not find item in Foodics menu: %s', item.name_snapshot)
+            logger.debug('[laffe] Added item: %s x%s', item.name_snapshot, item.qty)
 
-        # Add kitchen notes if any
+        # Kitchen notes
+        kitchen_notes = f'توترز - {oid}'
         if order.notes:
-            try:
-                notes_field = page.get_by_role("textbox", name="ملاحظات المطبخ*")
-                notes_field.click()
-                notes_field.fill(order.notes)
-            except Exception:
-                logger.warning('[laffe] Could not fill notes for order %s', order.external_id)
+            kitchen_notes += f'\n{order.notes}'
+        try:
+            notes_field = page.get_by_role('textbox', name='ملاحظات المطبخ*')
+            notes_field.click()
+            notes_field.fill(kitchen_notes)
+        except Exception:
+            snap('5_notes_failed')
+            logger.warning('[laffe] Could not fill notes for order %s', oid)
 
-        # Save the order — tries known button labels until one works
-        _save_order(page, order.external_id)
+        # Save the order
+        try:
+            _save_order(page, oid)
+        except Exception as e:
+            snap('6_final_save_failed')
+            raise
 
-        # Extract Foodics order ID from the post-save page state
-        pos_id = _extract_pos_id(page, order.external_id)
-        logger.info('[laffe] Order %s → Foodics ID: %s', order.external_id, pos_id or '(unknown)')
+        snap('7_done')
+        pos_id = _extract_pos_id(page, oid)
+        logger.info('[laffe] Order %s → Foodics ID: %s', oid, pos_id or '(unknown)')
         return pos_id
 
     def update_order_status(self, order, new_status: str) -> POSResult:
