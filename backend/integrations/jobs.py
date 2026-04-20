@@ -15,9 +15,9 @@ def push_order_to_pos(order_id: int):
         logger.error('[integrations] push_order_to_pos: order %s not found', order_id)
         return
 
-    # Skip if already pushed
-    if order.pos_external_id:
-        logger.info('[integrations] Order %s already pushed to POS, skipping', order.external_id)
+    # Skip if already past 'new' — order was already pushed
+    if order.status != Order.STATUS_NEW:
+        logger.info('[integrations] Order %s status=%s, skipping POS push', order.external_id, order.status)
         return
 
     try:
@@ -29,7 +29,8 @@ def push_order_to_pos(order_id: int):
             order.pos_external_id = result.external_id or ''
             order.save(update_fields=['pos_external_id'])
             from orders.services import transition_order_status
-            transition_order_status(order, Order.STATUS_ACCEPTED, actor=None)
+            if order.status != Order.STATUS_ACCEPTED:
+                transition_order_status(order, Order.STATUS_ACCEPTED, actor=None)
             logger.info(
                 '[integrations] Order %s pushed to POS as %s',
                 order.external_id, result.external_id,
