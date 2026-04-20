@@ -237,29 +237,35 @@ class LaffeAdapter(BasePOSAdapter):
         for item in (items or []):
             try:
                 page.get_by_text(item.name_snapshot, exact=True).first.click(timeout=5_000)
-                # If a modifier modal opened, increase qty then confirm
-                confirmed = False
+                page.wait_for_timeout(800)
+
+                # Check if a modal opened (has a confirm button)
+                modal_open = False
                 for confirm_label in ['تحديث', 'إضافة', 'إضافة إلى الطلب', 'تأكيد', 'موافق']:
+                    btn = page.locator(f'button:has-text("{confirm_label}")').last
                     try:
-                        btn = page.get_by_role('button', name=confirm_label).first
-                        btn.wait_for(state='visible', timeout=4_000)
-                        # Increase qty inside modal using + button
-                        if item.qty > 1:
-                            plus_btn = page.locator('button:has-text("+")').first
-                            for _ in range(item.qty - 1):
-                                plus_btn.click()
-                                page.wait_for_timeout(200)
-                        btn.click()
-                        page.wait_for_timeout(600)
-                        confirmed = True
-                        break
+                        if btn.is_visible(timeout=1_000):
+                            modal_open = True
+                            # Set qty using الكمية + button (top-right of modal)
+                            if item.qty > 1:
+                                qty_plus = page.locator('[class*="quantity"] button, [class*="qty"] button').filter(has_text='+').first
+                                for _ in range(item.qty - 1):
+                                    try:
+                                        qty_plus.click(timeout=1_000)
+                                        page.wait_for_timeout(150)
+                                    except Exception:
+                                        break
+                            btn.click()
+                            page.wait_for_timeout(600)
+                            break
                     except Exception:
                         continue
-                if not confirmed and item.qty > 1:
-                    # No modal — item added directly, click tile again for remaining qty
+
+                if not modal_open and item.qty > 1:
                     for _ in range(item.qty - 1):
                         page.get_by_text(item.name_snapshot, exact=True).first.click(timeout=5_000)
                         page.wait_for_timeout(400)
+
             except Exception:
                 snap(f'4_item_failed_{item.name_snapshot[:20]}')
                 logger.warning('[laffe] Could not find item in Foodics menu: %s', item.name_snapshot)
