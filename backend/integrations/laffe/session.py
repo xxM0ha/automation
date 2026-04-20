@@ -70,7 +70,7 @@ class PlaywrightWorker:
         self._thread.start()
         logger.info('[worker] Started Playwright thread for restaurant %s', restaurant_id)
 
-    def submit(self, fn: Callable[[Page], Any], timeout: int = 120) -> Any:
+    def submit(self, fn: Callable[[Page], Any], timeout: int = 280) -> Any:
         """
         Submit work from any thread. Blocks until fn(page) completes.
         Raises the exception if fn raised one.
@@ -99,7 +99,7 @@ class PlaywrightWorker:
             nonlocal pw, browser, context, page
             logger.info('[worker] Booting browser for restaurant %s', self.restaurant_id)
             pw = sync_playwright().start()
-            browser = pw.chromium.launch(headless=False)
+            browser = pw.chromium.launch(headless=True)
             session_file = SESSIONS_DIR / f'restaurant_{self.restaurant_id}.json'
             if session_file.exists():
                 logger.debug('[worker] Loading saved cookies')
