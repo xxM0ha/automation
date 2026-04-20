@@ -146,8 +146,8 @@ CORS_ALLOW_CREDENTIALS = False
 Q_CLUSTER = {
     'name': 'prime_automation',
     'workers': 2,
-    'timeout': 120,
-    'retry': 180,
+    'timeout': 300,
+    'retry': 360,
     'max_attempts': 3,
     'orm': 'default',    # ORM broker — no Redis needed
     'ack_failures': True,
