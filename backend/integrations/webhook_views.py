@@ -60,6 +60,11 @@ def receive_webhook(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+    # ── Restaurant alias mapping (zohor/riz/ziraee → laffe) ──────────────────
+    RESTAURANT_ALIASES = {'zohor': 'laffe', 'riz': 'laffe', 'ziraee': 'laffe'}
+    source_restaurant = restaurant_slug  # preserve original for branch/menu mapping
+    restaurant_slug   = RESTAURANT_ALIASES.get(restaurant_slug, restaurant_slug)
+
     # ── Resolve restaurant + platform ─────────────────────────────────────────
     try:
         restaurant = Restaurant.objects.get(slug=restaurant_slug, is_active=True)
@@ -113,8 +118,8 @@ def receive_webhook(request):
 
     if unmatched:
         logger.info(
-            '[webhook] %s order rejected — unmatched items: %s',
-            platform_slug, unmatched,
+            '[webhook] %s order rejected — unmatched items: %s | raw_text: %s',
+            platform_slug, unmatched, raw_text,
         )
         items_list = '\n'.join(f'• {name}' for name in unmatched)
         _create_alert_notification(
@@ -162,7 +167,7 @@ def receive_webhook(request):
         address=draft.get('address', ''),
         notes=draft.get('notes', ''),
         total=draft.get('total', 0),
-        raw_payload={'platform': platform_slug, 'restaurant': restaurant_slug, 'raw_text': raw_text},
+        raw_payload={'platform': platform_slug, 'restaurant': restaurant_slug, 'source_restaurant': source_restaurant, 'raw_text': raw_text},
         items=resolved_items,
         restaurant=restaurant,
         platform=platform,
@@ -178,7 +183,7 @@ def receive_webhook(request):
     _create_order_notification(restaurant, platform, order)
 
     logger.info('[webhook] %s order %s created, POS push queued', platform_slug, order.external_id)
-    return Response({'status': 'accepted', 'orderId': order.external_id})
+    return Response({'status': 'received'})
 
 
 # ── Parser dispatch ────────────────────────────────────────────────────────────
