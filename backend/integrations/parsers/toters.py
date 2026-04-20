@@ -76,10 +76,7 @@ def parse(raw_text: str) -> dict:
         items.append(item)
 
     for tok in tokens:
-        if tok in _END_MARKERS or _TIME_LEFT_PAT.match(tok):
-            break
-
-        if _SKIP_TOKENS.match(tok):
+        if _SKIP_TOKENS.match(tok) or _TIME_LEFT_PAT.match(tok):
             continue
 
         en_tok = ar_to_en_digits(tok)
