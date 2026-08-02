@@ -1,0 +1,80 @@
+# ===== Secrets — NEVER commit =====
+**/.env
+**/.env.*
+!**/.env.example
+*.sqlite3
+backend/backups/
+backend/secrets/
+backend/integrations/laffe/sessions/
+*firebase-adminsdk*.json
+firebase-service-account.json
+google-services.json
+App/google-services.json
+*.keystore
+*.jks
+*.p12
+*.p8
+
+# ===== Credential-bearing one-off scripts (contain server password) =====
+/*.py
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# ===== Virtual environments =====
+backend/venv/
+venv/
+env/
+.venv/
+
+# ===== Node / build artifacts =====
+node_modules/
+**/node_modules/
+frontend/dist/
+App/dist/
+App/.expo/
+App/android/
+App/ios/
+print-agent/build/
+print-agent/dist/
+backend/staticfiles/
+backend/media/
+dist/
+build/
+
+# ===== Logs =====
+backend/logs/
+logs/
+*.log
+
+# ===== Local scratch / investigation files =====
+backend/baly_conf.json
+backend/toters_full.json
+backend/platconf.txt
+backend/flowdepth.txt
+backend/empty_mappings.txt
+backend/_*.py
+find.json
+foodics_fail/
+problem_orders_last_2_days.md
+
+# ===== Playwright recordings =====
+backend/foodics_recorded.py
+backend/record_foodics.py
+backend/foodics_trace.zip
+
+# ===== Large binaries / non-code =====
+*.pdf
+Tiptop.prj*.xml
+
+# ===== OS / editor / agent =====
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.claude/

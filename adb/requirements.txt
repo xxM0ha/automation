@@ -1,0 +1,13 @@
+# Host-side ADB automation runner — dependencies
+#
+# There are NO pip packages to install. This package is intentionally built on
+# the Python standard library only, so it can be dropped onto a Raspberry Pi or
+# mini-PC with nothing more than a base Python install.
+#
+# Requirements:
+#   * Python 3.9 or newer
+#   * Android platform-tools providing the `adb` binary, on PATH
+#       Debian/Raspberry Pi OS:  sudo apt install android-tools-adb
+#
+# (This file is intentionally empty of packages — `pip install -r requirements.txt`
+#  is a no-op.)

@@ -1,0 +1,50 @@
+{
+  "expo": {
+    "name": "Ordo",
+    "slug": "App",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "automation.prime.app",
+      "googleServicesFile": "./google-services.json",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/icon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "edgeToEdgeEnabled": true,
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/icon.png"
+    },
+    "plugins": [
+      "expo-font",
+      "expo-secure-store",
+      "@react-native-firebase/app",
+      "@react-native-firebase/messaging"
+    ],
+    "runtimeVersion": {
+      "policy": "fingerprint"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/7c551302-5585-4d04-838d-c672383c3187"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "7c551302-5585-4d04-838d-c672383c3187"
+      }
+    },
+    "owner": "unk.moha2"
+  }
+}

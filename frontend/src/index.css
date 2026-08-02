@@ -1,0 +1,99 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Cairo", ui-sans-serif, system-ui, sans-serif;
+  --font-headline: "Cairo", sans-serif;
+  --font-display: "Poppins", "Cairo", sans-serif;   /* Latin "ordo" wordmark */
+  --font-technical: "IBM Plex Sans", monospace;
+
+  /* ── ORDO brand core (دليل الهوية) ──────────────────────────────── */
+  --color-ink: #0a0a0a;        /* حبر — text, structure, dark surfaces */
+  --color-paper: #ffffff;      /* ورق — backgrounds, space */
+  --color-lime: #90f018;       /* ليموني — the signal: use sparingly (~10%) */
+  --color-forest: #2e6b0e;     /* غابة — green TEXT / links on light bg */
+
+  /* brand neutrals */
+  --color-graphite: #2a2a2a;
+  --color-slate: #5e625c;
+  --color-mist: #e6e8e3;
+  --color-smoke: #f4f5f2;
+
+  /* primary = lime FILL with ink text (the "accept" moment) */
+  --color-primary: #90f018;
+  --color-primary-container: #7ed30f;
+  --color-on-primary: #0a0a0a;
+  --color-on-primary-container: #1f3d00;
+
+  --color-secondary: #5e625c;
+  --color-on-secondary: #ffffff;
+
+  --color-tertiary: #b23a3a;            /* error red */
+  --color-tertiary-container: #ff7b61;
+  --color-on-tertiary: #ffffff;
+
+  /* surfaces — paper + neutral greys, never tinted */
+  --color-surface: #ffffff;
+  --color-surface-container-lowest: #ffffff;
+  --color-surface-container-low: #f4f5f2;        /* دخان smoke */
+  --color-surface-container: #eef0ec;
+  --color-surface-container-high: #e6e8e3;       /* ضباب mist */
+  --color-surface-container-highest: #dde0db;
+
+  --color-on-surface: #0a0a0a;                   /* ink */
+  --color-on-surface-variant: #5e625c;           /* slate */
+
+  --color-outline: #5e625c;
+  --color-outline-variant: #e6e8e3;
+
+  /* functional states (use with restraint) */
+  --color-success: #2e6b0e;
+  --color-error: #b23a3a;
+  --color-warning: #b8860b;
+
+  --radius-lg: 2rem;
+  --radius-xl: 3rem;
+}
+
+@layer base {
+  html {
+    direction: rtl;
+  }
+  body {
+    @apply bg-surface text-on-surface font-sans antialiased;
+    font-feature-settings: "kern" 1;
+  }
+  * {
+    font-family: "Cairo", ui-sans-serif, system-ui, sans-serif;
+  }
+}
+
+.glass-nav {
+  @apply backdrop-blur-lg bg-surface/70;
+}
+
+/* Lime is a FILL, not a text colour — green text uses غابة (forest). */
+.text-gradient {
+  @apply text-on-surface;
+}
+
+/* Brand lime is flat — no gradients. Kept as a class so legacy usages stay on-brand. */
+.bg-primary-gradient {
+  @apply bg-primary;
+}
+
+/* The "ordo" wordmark — lowercase geometric Latin. Force LTR so the split
+   spans (ord + o) don't reorder to "oord" inside the RTL document. */
+.wordmark {
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  text-transform: lowercase;
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
+/* RTL-aware scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #c1c7d3; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #717783; }

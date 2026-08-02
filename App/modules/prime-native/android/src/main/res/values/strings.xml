@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="accessibility_service_description">يتيح هذا لتطبيق Prime Automation قراءة الطلبات من تطبيقات التوصيل وتنفيذ المهام تلقائياً نيابةً عنك.</string>
+</resources>

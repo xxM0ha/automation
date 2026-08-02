@@ -1,0 +1,11 @@
+{
+  "base_url": "https://ordoiraq.com",
+  "email": "branch-account@example.com",
+  "password": "the-branch-password",
+  "printers": ["192.168.1.50", "192.168.1.51:9100"],
+  "poll_seconds": 4,
+  "paper_width": 576,
+  "font_path": "C:\\Windows\\Fonts\\tahoma.ttf",
+  "font_size": 30,
+  "copies": 1
+}

@@ -1,0 +1,243 @@
+{
+  "schemaVersion": 2,
+  "updatedAt": "2026-05-25T00:00:00Z",
+  "backend": {
+    "baseUrl": "https://api.3alijny.com",
+    "restaurant": "laffe"
+  },
+  "platforms": [
+    {
+      "platform": "toters",
+      "label": "Toters",
+      "enabled": true,
+      "runMode": "continuous",
+      "targetPackage": "com.toters.totersmerchant",
+      "parameters": {
+        "scanIntervalSec": 2,
+        "autoConfirm": true
+      },
+      "selectors": {
+        "appPackage":    { "strategy": "package", "value": "com.toters.totersmerchant" },
+        "iqdTrigger":    { "strategy": "text",    "value": "IQD",         "match": "contains" },
+        "totalAnchor":   { "strategy": "text",    "value": "مجموع",     "match": "contains" },
+        "doneButton":    { "strategy": "text",    "value": "أكد الطلب",   "match": "contains" }
+      },
+      "flow": [
+        { "type": "launchApp",  "selector": "appPackage" },
+        { "type": "waitForApp", "selector": "appPackage", "timeoutMs": 8000 },
+        { "type": "watchFor",   "selector": "iqdTrigger", "intervalMs": 500 },
+        { "type": "tap",        "selector": "iqdTrigger" },
+        { "type": "waitFor",    "selector": "doneButton", "timeoutMs": 5000 },
+        { "type": "readScreenScrolling", "until": "totalAnchor", "maxScrollPasses": 12, "saveAs": "screen" },
+        {
+          "type": "sendRequest",
+          "endpoint": "tayf.orders.create",
+          "body": "screen",
+          "saveAs": "res"
+        },
+        {
+          "type": "if",
+          "condition": { "var": "res.confirm", "op": "equals", "value": true },
+          "then": [
+            { "type": "tap",  "selector": "doneButton" },
+            { "type": "wait", "durationMs": 2000 },
+            { "type": "back" },
+            { "type": "wait", "durationMs": 1500 }
+          ]
+        }
+      ]
+    },
+    {
+      "platform": "toters_menu",
+      "label": "Toters · القائمة",
+      "enabled": true,
+      "runMode": "once",
+      "control": "stopped",
+      "priority": 5,
+      "targetPackage": "com.toters.totersmerchant",
+      "parameters": {
+        "scanIntervalSec": 5,
+        "autoConfirm": false
+      },
+      "vars": {
+        "pushItems": [
+          { "name": "فنكر رز", "available": false }
+        ]
+      },
+      "selectors": {
+        "appPackage":          { "strategy": "package",     "value": "com.toters.totersmerchant" },
+        "menuButton":          { "strategy": "contentDesc", "value": "فتح لائحة التنقل" },
+        "foodMenu":            { "strategy": "text",        "value": "قائمة الطعام",      "match": "contains" },
+        "listAnchor":          { "strategy": "viewId",      "value": "et_search" },
+        "itemRow":             { "strategy": "text",        "value": "{{item.name}}",     "match": "contains" },
+        "threeDots":           { "strategy": "viewId",      "value": "tv_options" },
+        "chooseAvailability":  { "strategy": "text",        "value": "أختر متاحية",       "match": "contains" },
+        "availableOption":     { "strategy": "text",        "value": "متاح",              "match": "contains" },
+        "notAvailable":        { "strategy": "text",        "value": "غير متوفر الآن",    "match": "contains" },
+        "confirmChanges":      { "strategy": "text",        "value": "تأكيد التغييرات",   "match": "contains" }
+      },
+      "flow": [
+        { "type": "launchApp",   "selector": "appPackage" },
+        { "type": "waitForApp",  "selector": "appPackage", "timeoutMs": 8000 },
+        { "type": "tap",         "selector": "menuButton" },
+        { "type": "waitFor",     "selector": "foodMenu", "timeoutMs": 5000 },
+        { "type": "tap",         "selector": "foodMenu" },
+        { "type": "waitFor",     "selector": "listAnchor", "timeoutMs": 5000 },
+        {
+          "type": "forEach",
+          "items": "pushItems",
+          "as": "item",
+          "do": [
+            { "type": "scrollUntil", "until": "itemRow", "direction": "down", "maxScrollPasses": 15 },
+            { "type": "tapInRow",    "anchor": "itemRow", "target": "threeDots" },
+            { "type": "waitFor",     "selector": "chooseAvailability", "timeoutMs": 5000 },
+            { "type": "tap",         "selector": "chooseAvailability" },
+            {
+              "type": "if",
+              "condition": { "var": "item.available", "op": "equals", "value": true },
+              "then": [
+                { "type": "scrollUntil", "until": "availableOption", "direction": "down", "maxScrollPasses": 12 },
+                { "type": "tap",         "selector": "availableOption" }
+              ],
+              "else": [
+                { "type": "scrollUntil", "until": "notAvailable", "direction": "down", "maxScrollPasses": 12 },
+                { "type": "tap",         "selector": "notAvailable" }
+              ]
+            },
+            { "type": "scrollUntil", "until": "confirmChanges", "direction": "down", "maxScrollPasses": 12 },
+            { "type": "tap",         "selector": "confirmChanges" },
+            { "type": "wait",        "durationMs": 1500 },
+            { "type": "back" },
+            { "type": "wait",        "durationMs": 1000 }
+          ]
+        }
+      ]
+    },
+    {
+      "platform": "talabat",
+      "label": "Talabat",
+      "enabled": true,
+      "runMode": "once",
+      "parameters": {
+        "scanIntervalSec": 5,
+        "autoConfirm": false
+      },
+      "selectors": {
+        "appPackage":    { "strategy": "package", "value": "com.talabat.restaurant" },
+        "ordersList":    { "strategy": "viewId",  "value": "orders_recycler" },
+        "orderCard":     { "strategy": "viewId",  "value": "order_item" },
+        "orderNumber":   { "strategy": "text",    "value": "رقم الطلب",  "match": "contains" },
+        "customerName":  { "strategy": "viewId",  "value": "customer_name" },
+        "orderTotal":    { "strategy": "text",    "value": "الإجمالي",   "match": "contains" },
+        "confirmButton": { "strategy": "text",    "value": "قبول",       "match": "exact" }
+      },
+      "flow": [
+        { "type": "launchApp", "selector": "appPackage" },
+        { "type": "waitFor",   "selector": "ordersList", "timeoutMs": 8000 },
+        {
+          "type": "extractList",
+          "listSelector": "ordersList",
+          "itemSelector": "orderCard",
+          "fields": {
+            "orderNumber":  "orderNumber",
+            "customerName": "customerName",
+            "total":        "orderTotal"
+          },
+          "maxScrollPasses": 8
+        },
+        {
+          "type": "if",
+          "condition": { "var": "autoConfirm", "op": "equals", "value": true },
+          "then": [{ "type": "tap", "selector": "confirmButton" }]
+        },
+        {
+          "type": "sendRequest",
+          "endpoint": "tayf.orders.create",
+          "fields": ["orderNumber", "customerName", "total"]
+        }
+      ]
+    },
+    {
+      "platform": "baly",
+      "label": "Baly",
+      "enabled": false,
+      "runMode": "once",
+      "parameters": {
+        "scanIntervalSec": 8,
+        "autoConfirm": false
+      },
+      "selectors": {
+        "appPackage":   { "strategy": "package", "value": "iq.baly.vendor" },
+        "ordersList":   { "strategy": "viewId",  "value": "list_orders" },
+        "orderCard":    { "strategy": "viewId",  "value": "order_row" },
+        "orderNumber":  { "strategy": "text",    "value": "طلب",          "match": "contains" },
+        "customerName": { "strategy": "viewId",  "value": "txt_customer" },
+        "orderTotal":   { "strategy": "text",    "value": "المجموع",     "match": "contains" }
+      },
+      "flow": [
+        { "type": "launchApp", "selector": "appPackage" },
+        { "type": "waitFor",   "selector": "ordersList", "timeoutMs": 8000 },
+        {
+          "type": "extractList",
+          "listSelector": "ordersList",
+          "itemSelector": "orderCard",
+          "fields": {
+            "orderNumber":  "orderNumber",
+            "customerName": "customerName",
+            "total":        "orderTotal"
+          },
+          "maxScrollPasses": 6
+        },
+        {
+          "type": "sendRequest",
+          "endpoint": "tayf.orders.create",
+          "fields": ["orderNumber", "customerName", "total"]
+        }
+      ]
+    },
+    {
+      "platform": "foodics",
+      "label": "Foodics",
+      "enabled": true,
+      "runMode": "once",
+      "parameters": {
+        "scanIntervalSec": 6,
+        "autoConfirm": true
+      },
+      "selectors": {
+        "appPackage":    { "strategy": "package", "value": "com.foodics.pos" },
+        "ordersList":    { "strategy": "viewId",  "value": "rv_tickets" },
+        "orderCard":     { "strategy": "viewId",  "value": "ticket_card" },
+        "orderNumber":   { "strategy": "text",    "value": "#",     "match": "contains" },
+        "orderTotal":    { "strategy": "text",    "value": "Total", "match": "contains" },
+        "confirmButton": { "strategy": "text",    "value": "Accept","match": "exact" }
+      },
+      "flow": [
+        { "type": "launchApp", "selector": "appPackage" },
+        { "type": "waitFor",   "selector": "ordersList", "timeoutMs": 10000 },
+        { "type": "wait",      "durationMs": 1500 },
+        {
+          "type": "extractList",
+          "listSelector": "ordersList",
+          "itemSelector": "orderCard",
+          "fields": {
+            "orderNumber": "orderNumber",
+            "total":       "orderTotal"
+          },
+          "maxScrollPasses": 10
+        },
+        {
+          "type": "if",
+          "condition": { "var": "autoConfirm", "op": "equals", "value": true },
+          "then": [{ "type": "tap", "selector": "confirmButton" }],
+          "else": [{ "type": "wait", "durationMs": 500 }]
+        },
+        {
+          "type": "sendRequest",
+          "endpoint": "tayf.orders.create",
+          "fields": ["orderNumber", "total"]
+        }
+      ]
+    }
+  ]
+}

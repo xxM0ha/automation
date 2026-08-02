@@ -1,0 +1,22 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'automation.prime.app'
+version = '0.7.10'
+
+android {
+  // Must differ from the app's namespace (automation.prime.app) or both modules
+  // generate automation.prime.app.BuildConfig and the release dex merge fails.
+  // The Kotlin sources stay in package automation.prime.app, so the manifest's
+  // fully-qualified service references still resolve.
+  namespace "automation.prime.app.nativemodule"
+  defaultConfig {
+    versionCode 1
+    versionName "0.7.10"
+  }
+  lintOptions {
+    abortOnError false
+  }
+}
