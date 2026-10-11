@@ -6,7 +6,7 @@ Runs on Django's temporary test database — never touches the live data.
 from decimal import Decimal
 from unittest.mock import patch
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from rest_framework.authtoken.models import Token
 from rest_framework.test import APIClient
 
@@ -16,6 +16,9 @@ from menu.models import MenuItem, MenuItemPlatform
 from restaurants.models import Restaurant, RestaurantUser, User
 
 
+# Production runs with DEBUG=False, which redirects plain-http requests to https;
+# the test client speaks http, so switch that off here or every request is a 301.
+@override_settings(SECURE_SSL_REDIRECT=False)
 class BulkAvailabilityTests(TestCase):
     def setUp(self):
         self.branch = Restaurant.objects.create(name='الزراعي', slug='bulk-branch', is_active=True)

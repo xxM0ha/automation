@@ -5,7 +5,7 @@ Runs on Django's temporary test database — never touches the live data.
 """
 import time
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from rest_framework.authtoken.models import Token
 from rest_framework.test import APIClient
 
@@ -13,6 +13,9 @@ from integrations.models import DeviceLog
 from restaurants.models import Restaurant, RestaurantUser, User
 
 
+# Production runs with DEBUG=False, which redirects plain-http requests to https;
+# the test client speaks http, so switch that off here or every request is a 301.
+@override_settings(SECURE_SSL_REDIRECT=False)
 class DeviceLogTests(TestCase):
     def setUp(self):
         self.branch = Restaurant.objects.create(name='الزراعي', slug='ziraee-test', is_active=True)
