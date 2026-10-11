@@ -1,13 +1,13 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import type { ChangeEvent } from 'react';
-import { RefreshCw, Plus, Settings, MoreVertical, Search, X, CheckCircle2, Upload, Trash2 } from 'lucide-react';
+import { RefreshCw, Plus, Settings, MoreVertical, Search, X, CheckCircle2, Upload, Trash2, Download } from 'lucide-react';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
 import { PlatformBadge } from '../components/ui/PlatformBadge';
 import { Sidebar } from '../components/layout/Sidebar';
 import { TopNav } from '../components/layout/TopNav';
 import { cn } from '../lib/utils';
-import { menu as menuApi, platforms as platformsApi, type ApiMenuItem, type ApiMenuCategory, type ApiPlatform } from '../lib/api';
+import { menu as menuApi, platforms as platformsApi, branchesApi, getActiveBranch, type ApiMenuItem, type ApiMenuCategory, type ApiPlatform, type ApiImportItem } from '../lib/api';
 import { PLATFORMS } from '../data/platforms';
 import type { Page, MenuItem } from '../types';
 
@@ -29,6 +29,8 @@ interface ItemFormProps {
     platformNames: Record<string, string>;
     platformAliases: Record<string, string[]>;
     platformPosCategories: Record<string, string>;
+    foodicsPrice: number | null;
+    foodicsProductId: string;
     image: string;
   }) => Promise<void>;
   title: string;
@@ -44,6 +46,8 @@ const ItemFormModal = ({ initial, apiCategories, onCategoryCreated, onClose, onS
   const [platformNames, setPlatformNames]   = useState<Record<string, string>>(initial?.platformNames ?? {});
   const [platformAliases, setPlatformAliases] = useState<Record<string, string[]>>(initial?.platformAliases ?? {});
   const [platformPosCategories, setPlatformPosCategories] = useState<Record<string, string>>(initial?.platformPosCategories ?? {});
+  const [foodicsPrice, setFoodicsPrice] = useState<string>(initial?.foodicsPrice != null ? String(initial.foodicsPrice) : '');
+  const [foodicsProductId, setFoodicsProductId] = useState<string>(initial?.foodicsProductId ?? '');
   const [imagePreview, setImagePreview] = useState<string | null>(initial?.image && initial.image !== PLACEHOLDER_IMAGE ? initial.image : null);
   const [errors, setErrors]           = useState<Record<string, string>>({});
   const [saving, setSaving]           = useState(false);
@@ -88,6 +92,11 @@ const ItemFormModal = ({ initial, apiCategories, onCategoryCreated, onClose, onS
 
   const handleSubmit = async () => {
     if (!name.trim()) { setErrors({ name: 'الاسم مطلوب' }); return; }
+    // Accept Arabic-Indic digits and thousands separators ("٦٬٥٠٠" / "6,500").
+    const priceText = foodicsPrice.trim()
+      .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+      .replace(/[,٬،\s]/g, '');
+    if (priceText && !/^\d+$/.test(priceText)) { setErrors({ foodicsPrice: 'أدخل السعر كرقم فقط، مثل 6500' }); return; }
     setErrors({});
     setSaving(true);
     try {
@@ -98,6 +107,8 @@ const ItemFormModal = ({ initial, apiCategories, onCategoryCreated, onClose, onS
         platformNames,
         platformAliases,
         platformPosCategories,
+        foodicsPrice: priceText ? Number(priceText) : null,
+        foodicsProductId: foodicsProductId.trim(),
         image: imagePreview || PLACEHOLDER_IMAGE,
       });
       onClose();
@@ -157,6 +168,37 @@ const ItemFormModal = ({ initial, apiCategories, onCategoryCreated, onClose, onS
                 onChange={(e) => { setName(e.target.value); setErrors((p) => ({ ...p, name: '' })); }}
               />
               {errors.name && <p className="text-xs text-red-500 mt-1">{errors.name}</p>}
+            </div>
+
+            {/* Foodics price */}
+            <div>
+              <label className="block text-xs font-bold text-on-surface-variant mb-1.5">سعر Foodics (د.ع)</label>
+              <input
+                className={cn('w-full rounded-xl border px-4 py-2.5 text-sm outline-none focus:ring-2 transition-all', errors.foodicsPrice ? 'border-red-300 bg-red-50 focus:ring-red-200' : 'border-mist focus:ring-primary/20 focus:border-primary/40')}
+                placeholder="مثال: 6500"
+                inputMode="numeric"
+                dir="ltr"
+                value={foodicsPrice}
+                onChange={(e) => { setFoodicsPrice(e.target.value); setErrors((p) => ({ ...p, foodicsPrice: '' })); }}
+              />
+              {errors.foodicsPrice
+                ? <p className="text-xs text-red-500 mt-1">{errors.foodicsPrice}</p>
+                : <p className="text-[11px] text-on-surface-variant mt-1">سعر هذا الصنف على Foodics بالضبط — عند إرسال الطلب يُختار الصنف الذي يحمل هذا السعر. اتركه فارغاً للمطابقة بسعر التطبيق.</p>}
+            </div>
+
+            {/* Foodics product id */}
+            <div>
+              <label className="block text-xs font-bold text-on-surface-variant mb-1.5">معرّف صنف Foodics</label>
+              <input
+                className="w-full rounded-xl border border-mist px-4 py-2.5 text-xs font-mono outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/40 transition-all"
+                placeholder="مثال: 9da6d06e-9cc6-4686-9ce1-44dcb2a4f45b"
+                dir="ltr"
+                value={foodicsProductId}
+                onChange={(e) => setFoodicsProductId(e.target.value)}
+              />
+              <p className="text-[11px] text-on-surface-variant mt-1">
+                عند ضبطه يُرسل الطلب بهذا المعرّف بدل البحث بالاسم والسعر — تغيير اسم الصنف في Foodics لن يؤثر عليه. اتركه فارغاً للمطابقة بالاسم.
+              </p>
             </div>
 
             {/* Category */}
@@ -326,8 +368,228 @@ function toMenuItem(a: ApiMenuItem): MenuItem {
     platformNames,
     platformAliases,
     platformPosCategories,
+    foodicsPrice:  a.foodicsPrice != null ? Number(a.foodicsPrice) : null,
+    foodicsProductId: a.foodicsProductId ?? '',
   };
 }
+
+// ─── Import items from another branch ─────────────────────────────────────────
+
+interface ImportModalProps {
+  onClose: () => void;
+  onImported: (summary: string) => void;
+}
+
+const ImportModal = ({ onClose, onImported }: ImportModalProps) => {
+  const [branchOptions, setBranchOptions] = useState<{ slug: string; name: string }[]>([]);
+  const [branch, setBranch]               = useState('');
+  const [rows, setRows]                   = useState<ApiImportItem[]>([]);
+  const [selected, setSelected]           = useState<number[]>([]);
+  const [search, setSearch]               = useState('');
+  const [hideExisting, setHideExisting]   = useState(true);
+  const [updateExisting, setUpdateExisting] = useState(false);
+  const [loading, setLoading]             = useState(false);
+  const [importing, setImporting]         = useState(false);
+  const [error, setError]                 = useState('');
+
+  useEffect(() => {
+    const current = getActiveBranch();
+    branchesApi.list()
+      .then((list) => {
+        const others = list.filter((b) => b.slug !== current).map((b) => ({ slug: b.slug, name: b.name }));
+        setBranchOptions(others);
+        if (others.length) setBranch(others[0].slug);
+      })
+      .catch(() => setError('تعذّر تحميل الفروع'));
+  }, []);
+
+  useEffect(() => {
+    if (!branch) return;
+    setLoading(true);
+    setSelected([]);
+    setError('');
+    menuApi.importSource(branch)
+      .then((res) => setRows(res.items))
+      .catch(() => setError('تعذّر تحميل أصناف هذا الفرع'))
+      .finally(() => setLoading(false));
+  }, [branch]);
+
+  const q = search.trim();
+  const visible = rows.filter((r) => {
+    if (hideExisting && r.exists) return false;
+    if (!q) return true;
+    return r.name.includes(q) || r.apps.some((a) => a.name.includes(q) || a.aliases.some((x) => x.includes(q)));
+  });
+
+  const toggle = (id: number) =>
+    setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+
+  const allVisibleSelected = visible.length > 0 && visible.every((r) => selected.includes(r.id));
+  const toggleAll = () => setSelected(allVisibleSelected ? [] : visible.map((r) => r.id));
+
+  const handleImport = async () => {
+    if (!selected.length) return;
+    setImporting(true);
+    setError('');
+    try {
+      const res = await menuApi.importItems({ branch, itemIds: selected, updateExisting });
+      const parts = [`تم استيراد ${res.created} صنف`];
+      if (res.updated) parts.push(`تحديث ${res.updated}`);
+      if (res.skipped) parts.push(`تخطّي ${res.skipped} موجود مسبقاً`);
+      onImported(parts.join(' • '));
+      onClose();
+    } catch {
+      setError('تعذّر الاستيراد، حاول مجدداً');
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  return (
+    <>
+      <div className="fixed inset-0 z-40 bg-black/40 backdrop-blur-sm" onClick={onClose} />
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+        <div className="w-full max-w-2xl bg-white rounded-2xl shadow-2xl flex flex-col max-h-[90vh]">
+          {/* Header */}
+          <div className="flex items-center justify-between px-6 py-5 border-b border-mist">
+            <div>
+              <h2 className="text-xl font-black text-on-surface">استيراد أصناف من فرع آخر</h2>
+              <p className="text-xs text-on-surface-variant mt-0.5">
+                تُنسخ الأصناف المحددة بسعر Foodics والتصنيف وأسماء التطبيقات كما هي
+              </p>
+            </div>
+            <button onClick={onClose} className="p-2 rounded-xl text-on-surface-variant hover:bg-surface-container-low transition-colors">
+              <X size={20} />
+            </button>
+          </div>
+
+          {/* Controls */}
+          <div className="px-6 py-4 border-b border-mist space-y-3">
+            <div className="flex gap-2">
+              <select
+                className="flex-1 rounded-xl border border-mist px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-primary/20 bg-white cursor-pointer"
+                value={branch}
+                onChange={(e) => setBranch(e.target.value)}
+              >
+                {branchOptions.length === 0 && <option value="">لا توجد فروع أخرى</option>}
+                {branchOptions.map((b) => <option key={b.slug} value={b.slug}>{b.name}</option>)}
+              </select>
+              <div className="relative flex-1">
+                <Search className="absolute right-3 top-1/2 -translate-y-1/2 text-on-surface-variant" size={15} />
+                <input
+                  className="w-full bg-white border border-mist rounded-xl pr-9 pl-4 py-2.5 text-sm focus:ring-2 focus:ring-primary/20 outline-none"
+                  placeholder="ابحث بالاسم أو باسم التطبيق..."
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                />
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-4">
+              <label className="flex items-center gap-2 text-xs font-semibold text-on-surface-variant cursor-pointer">
+                <input type="checkbox" className="accent-primary" checked={hideExisting} onChange={(e) => setHideExisting(e.target.checked)} />
+                إخفاء الموجود مسبقاً
+              </label>
+              <label className="flex items-center gap-2 text-xs font-semibold text-on-surface-variant cursor-pointer">
+                <input type="checkbox" className="accent-primary" checked={updateExisting} onChange={(e) => setUpdateExisting(e.target.checked)} />
+                تحديث الأصناف الموجودة بدل تخطّيها
+              </label>
+              <button
+                type="button"
+                onClick={toggleAll}
+                disabled={!visible.length}
+                className="text-xs font-bold text-on-surface hover:text-on-surface/70 disabled:opacity-40 mr-auto"
+              >
+                {allVisibleSelected ? 'إلغاء تحديد الكل' : `تحديد الكل (${visible.length})`}
+              </button>
+            </div>
+          </div>
+
+          {/* List */}
+          <div className="flex-1 overflow-y-auto px-6 py-4">
+            {loading ? (
+              <div className="py-16 text-center text-on-surface-variant">
+                <RefreshCw size={28} className="mx-auto mb-3 animate-spin opacity-40" />
+                <p className="text-sm">جاري التحميل...</p>
+              </div>
+            ) : visible.length === 0 ? (
+              <div className="py-16 text-center text-on-surface-variant">
+                <Search size={36} className="mx-auto mb-3 opacity-30" />
+                <p className="text-sm">لا توجد أصناف لعرضها</p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {visible.map((r) => {
+                  const active = selected.includes(r.id);
+                  return (
+                    <button
+                      key={r.id}
+                      type="button"
+                      onClick={() => toggle(r.id)}
+                      className={cn(
+                        'w-full text-right rounded-2xl border px-4 py-3 transition-all flex items-start gap-3',
+                        active ? 'border-primary/40 bg-primary/[0.04]' : 'border-mist hover:border-primary/20'
+                      )}
+                    >
+                      <div className={cn(
+                        'mt-0.5 w-5 h-5 rounded-md border flex items-center justify-center shrink-0 transition-colors',
+                        active ? 'bg-primary border-primary' : 'border-mist bg-white'
+                      )}>
+                        {active && <CheckCircle2 size={14} className="text-white" />}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-bold text-sm text-on-surface">{r.name}</span>
+                          {r.categoryName && (
+                            <span className="text-[10px] font-semibold text-on-surface-variant bg-surface-container-low px-2 py-0.5 rounded-full">
+                              {r.categoryName}
+                            </span>
+                          )}
+                          {r.exists && (
+                            <span className="text-[10px] font-bold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full">موجود مسبقاً</span>
+                          )}
+                          {r.sameNameDifferentPrice && (
+                            <span className="text-[10px] font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded-full">نسخة بسعر مختلف</span>
+                          )}
+                        </div>
+                        <p className={cn('text-[11px] font-semibold mt-1', r.foodicsPrice != null ? 'text-on-surface-variant' : 'text-amber-600')}>
+                          {r.foodicsPrice != null
+                            ? `سعر Foodics: ${Number(r.foodicsPrice).toLocaleString('en-US')} د.ع`
+                            : 'لا يوجد سعر Foodics'}
+                        </p>
+                        {r.apps.length > 0 && (
+                          <div className="flex flex-wrap gap-1.5 mt-1.5">
+                            {r.apps.map((a) => (
+                              <span key={a.platform} className="text-[10px] text-on-surface-variant bg-surface-container-low px-2 py-0.5 rounded-full">
+                                {a.platform}: {[a.name, ...a.aliases].filter(Boolean).join(' / ')}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            {error && <p className="text-xs text-red-500 bg-red-50 px-3 py-2 rounded-lg mt-3">{error}</p>}
+          </div>
+
+          {/* Footer */}
+          <div className="px-6 py-4 border-t border-mist flex gap-3 items-center">
+            <span className="text-xs font-semibold text-on-surface-variant">{selected.length} محدد</span>
+            <div className="flex gap-3 mr-auto">
+              <Button variant="secondary" onClick={onClose} type="button">إلغاء</Button>
+              <Button onClick={handleImport} type="button" disabled={importing || !selected.length}>
+                {importing ? <RefreshCw size={15} className="animate-spin" /> : <Download size={16} />}
+                {importing ? 'جاري الاستيراد...' : 'استيراد المحدد'}
+              </Button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+};
 
 // ─── Main page ────────────────────────────────────────────────────────────────
 
@@ -341,6 +603,9 @@ export const MenuPage = ({ setPage }: MenuPageProps) => {
   const [menuOpenId, setMenuOpenId]   = useState<number | null>(null);
   const [showAddModal, setShowAddModal]   = useState(false);
   const [editItem, setEditItem]           = useState<MenuItem | null>(null);
+  const [showImport, setShowImport]       = useState(false);
+  const [toast, setToast]                 = useState('');
+  const [onlyUnlinked, setOnlyUnlinked]   = useState(false);
 
   const fetchItems = useCallback(async () => {
     try {
@@ -385,6 +650,8 @@ export const MenuPage = ({ setPage }: MenuPageProps) => {
       platforms: data.platforms, platformNames: data.platformNames,
       platformAliases: data.platformAliases,
       platformPosCategories: data.platformPosCategories,
+      foodicsPrice: data.foodicsPrice,
+      foodicsProductId: data.foodicsProductId,
     });
     setItems((prev) => [toMenuItem(created), ...prev]);
   };
@@ -396,6 +663,8 @@ export const MenuPage = ({ setPage }: MenuPageProps) => {
       platforms: data.platforms, platformNames: data.platformNames,
       platformAliases: data.platformAliases,
       platformPosCategories: data.platformPosCategories,
+      foodicsPrice: data.foodicsPrice,
+      foodicsProductId: data.foodicsProductId,
     });
     setItems((prev) => prev.map((item) => item.id === editItem.id ? toMenuItem(updated) : item));
   };
@@ -441,8 +710,11 @@ export const MenuPage = ({ setPage }: MenuPageProps) => {
   const filtered = items.filter((item) => {
     const matchesSearch = !searchVal || item.name.includes(searchVal) || item.description.includes(searchVal);
     const matchesCategory = !activeCategory || item.category === activeCategory;
-    return matchesSearch && matchesCategory;
+    const matchesLink = !onlyUnlinked || !item.foodicsProductId;
+    return matchesSearch && matchesCategory && matchesLink;
   });
+
+  const unlinkedCount = items.filter((i) => !i.foodicsProductId).length;
 
   const liveCount = items.filter((i) => i.status === 'نشط').length;
 
@@ -462,6 +734,10 @@ export const MenuPage = ({ setPage }: MenuPageProps) => {
               </p>
             </div>
             <div className="flex gap-3 shrink-0">
+              <Button variant="secondary" onClick={() => setShowImport(true)}>
+                <Download size={16} />
+                استيراد من فرع
+              </Button>
               <Button variant="secondary" onClick={handleSync}>
                 <RefreshCw size={16} className={syncing ? 'animate-spin' : ''} />
                 {syncing ? 'جاري المزامنة...' : 'مزامنة المنصات'}
@@ -489,6 +765,18 @@ export const MenuPage = ({ setPage }: MenuPageProps) => {
                 </button>
               )}
             </div>
+            <button
+              onClick={() => setOnlyUnlinked((v) => !v)}
+              className={cn(
+                'px-4 py-2.5 rounded-xl text-sm font-bold border transition-all shrink-0',
+                onlyUnlinked
+                  ? 'bg-amber-500 text-white border-amber-500'
+                  : 'bg-white text-on-surface-variant border-mist hover:border-amber-400 hover:text-on-surface'
+              )}
+              title="عرض الأصناف غير المرتبطة بصنف Foodics فقط"
+            >
+              غير مرتبط بـ Foodics{unlinkedCount ? ` (${unlinkedCount})` : ''}
+            </button>
             {categoryNames.length > 0 && (
               <div className="flex flex-wrap items-center gap-2 bg-surface-container-low p-1.5 rounded-2xl">
                 <button
@@ -546,6 +834,17 @@ export const MenuPage = ({ setPage }: MenuPageProps) => {
                     <h3 className="font-bold text-base text-on-surface leading-tight">{item.name}</h3>
                     {item.price && <span className="text-on-surface font-black text-sm shrink-0">{item.price}</span>}
                   </div>
+                  <p className={cn('text-[11px] font-semibold', item.foodicsPrice != null ? 'text-on-surface-variant' : 'text-amber-600')}>
+                    {item.foodicsPrice != null ? `سعر Foodics: ${item.foodicsPrice.toLocaleString('en-US')} د.ع` : 'لا يوجد سعر Foodics'}
+                  </p>
+                  <p
+                    className={cn('text-[11px] font-semibold', item.foodicsProductId ? 'text-forest' : 'text-amber-600')}
+                    title={item.foodicsProductId || undefined}
+                  >
+                    {item.foodicsProductId
+                      ? `مرتبط بـ Foodics · ${item.foodicsProductId.slice(0, 8)}`
+                      : 'غير مرتبط بصنف Foodics'}
+                  </p>
                   <p className="text-xs text-on-surface-variant line-clamp-2 leading-relaxed">{item.description}</p>
                   <div className="mt-auto pt-3 border-t border-slate-50 flex items-center justify-between">
                     {/* Availability toggle */}
@@ -659,6 +958,25 @@ export const MenuPage = ({ setPage }: MenuPageProps) => {
 
         </main>
       </div>
+
+      {/* Import from another branch */}
+      {showImport && (
+        <ImportModal
+          onClose={() => setShowImport(false)}
+          onImported={(summary) => {
+            setToast(summary);
+            fetchItems();
+            fetchCategories();
+            setTimeout(() => setToast(''), 6000);
+          }}
+        />
+      )}
+
+      {toast && (
+        <div className="fixed bottom-6 left-6 z-[60] bg-on-surface text-white text-sm font-bold px-4 py-3 rounded-xl shadow-2xl">
+          {toast}
+        </div>
+      )}
 
       {/* Add Item Modal */}
       {showAddModal && (

@@ -86,6 +86,15 @@ def receive_webhook(request):
         return Response({'detail': 'Platform not found.'}, status=status.HTTP_404_NOT_FOUND)
     except RestaurantPlatform.DoesNotExist:
         logger.warning('[webhook] %s not connected to %s', platform_slug, restaurant_slug)
+        reason = 'التطبيق غير مفعّل لهذا الفرع'
+        if not _recent_rejection(restaurant, platform, reason, []):
+            _create_alert_notification(
+                restaurant, platform,
+                f'التطبيق: {platform.name_ar}\n'
+                f'السبب: {reason} — لم يُستلم الطلب\n\n'
+                f'يرجى تفعيل التطبيق أو إدخال الطلب يدوياً.'
+            )
+            _record_rejection(restaurant, platform, '', reason, raw_text)
         return Response({'detail': 'Platform not connected.'}, status=status.HTTP_403_FORBIDDEN)
 
     logger.info(
@@ -200,7 +209,13 @@ def receive_webhook(request):
         )
         if not _recent_rejection(restaurant, platform, 'أصناف غير مرتبطة بالقائمة', unmatched):
             suggestions = _suggest_unmatched(unmatched, platform, restaurant)
-            items_list = '\n'.join(f'• {name}' for name in unmatched)
+            from menu.matcher import resolve, unmatched_reason
+            lines = []
+            for it in draft.get('items', []):
+                name, price = (it.get('name') or '').strip(), it.get('unit_price')
+                if resolve(name, platform, restaurant, price) is None:
+                    lines.append(f'• {name} — {unmatched_reason(name, platform, restaurant, price)}')
+            items_list = '\n'.join(lines) or '\n'.join(f'• {name}' for name in unmatched)
             _create_alert_notification(
                 restaurant, platform,
                 f'التطبيق: {platform.name_ar}\n'

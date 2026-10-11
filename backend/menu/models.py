@@ -39,6 +39,15 @@ class MenuItem(models.Model):
     is_available = models.BooleanField(default=True)
     stock_level = models.IntegerField(null=True, blank=True)
     pos_category = models.CharField(max_length=200, blank=True, default='')
+    # Exact price of this item's card on Foodics. When set, the Foodics adapter
+    # picks the card with this price instead of the closest match to the app's
+    # price — the same item is listed in several Foodics menus at different
+    # prices, and paid addons inflate the app price. Null → match by app price.
+    foodics_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    # Foodics product UUID. Once set, the POS push addresses the product by id
+    # instead of matching its name and price on screen — so renaming a product
+    # in Foodics (e.g. adding an "APP" suffix) can no longer break a push.
+    foodics_product_id = models.CharField(max_length=64, blank=True, default='', db_index=True)
     # Station printer this item is routed to for local (non-Foodics) printing.
     # Null → only the cashier printer(s) print it. See integrations.Printer.
     printer = models.ForeignKey(

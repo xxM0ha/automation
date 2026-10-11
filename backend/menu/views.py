@@ -30,6 +30,62 @@ class MenuItemViewSet(TenantScopedViewSet):
         return qs
 
 
+def _import_branches(request):
+    """(source, target, error_response) for an import request."""
+    target = request.user.current_restaurant
+    if target is None:
+        return None, None, Response({'detail': 'لا يوجد فرع نشط.'}, status=status.HTTP_400_BAD_REQUEST)
+    slug = (request.query_params.get('branch') or request.data.get('branch') or '').strip()
+    source = next((b for b in request.user.accessible_restaurants if b.slug == slug), None)
+    if source is None:
+        return None, None, Response({'detail': 'الفرع غير موجود أو غير متاح لك.'}, status=status.HTTP_404_NOT_FOUND)
+    if source.id == target.id:
+        return None, None, Response({'detail': 'اختر فرعاً آخر غير الفرع الحالي.'}, status=status.HTTP_400_BAD_REQUEST)
+    return source, target, None
+
+
+@api_view(['GET'])
+def import_source(request):
+    """Items of another branch, flagged with what this branch already has."""
+    source, target, err = _import_branches(request)
+    if err:
+        return err
+    from .import_utils import source_listing
+    return Response({
+        'branch': source.slug,
+        'name': source.name,
+        'items': source_listing(source, target),
+    })
+
+
+@api_view(['POST'])
+def import_items(request):
+    """Copy the chosen items from another branch into the current one, with
+    their Foodics price, category and per-app names/aliases."""
+    source, target, err = _import_branches(request)
+    if err:
+        return err
+    raw_ids = request.data.get('item_ids') or request.data.get('itemIds') or []
+    try:
+        ids = [int(i) for i in raw_ids]
+    except (TypeError, ValueError):
+        return Response({'detail': 'قائمة الأصناف غير صحيحة.'}, status=status.HTTP_400_BAD_REQUEST)
+    if not ids:
+        return Response({'detail': 'لم يتم اختيار أي صنف.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    update_existing = bool(request.data.get('update_existing') or request.data.get('updateExisting'))
+    from django.db import transaction
+    from .import_utils import import_items as run_import
+    with transaction.atomic():
+        result = run_import(source, target, ids, update_existing)
+    logger.info(
+        '[menu] %s imported %d item(s) %s → %s (created %d, updated %d, skipped %d)',
+        request.user.email, len(ids), source.slug, target.slug,
+        result['created'], result['updated'], result['skipped'],
+    )
+    return Response(result)
+
+
 @api_view(['PATCH'])
 def toggle_availability(request, pk):
     restaurant = request.user.current_restaurant

@@ -133,6 +133,14 @@ def parse(raw_text: str) -> dict:
             continue
         qty = int(qm.group(1))
         name = tokens[i + 1] if i + 1 < n else ''
+        # The order-DETAIL block lays items out as "x{qty}, name, price". Baly now
+        # sometimes prepends a SUMMARY/receipt block using the reverse layout
+        # ("name, x{qty}, price"), so the token after the qty there is a PRICE, not
+        # a name. Skip it — otherwise we create junk items named "6,000 د.ع". The
+        # same items parse correctly from the detail block below.
+        if _PRICE.search(ar_to_en_digits(name or '')):
+            i += 1
+            continue
         unit_price = 0.0
         j = i + 2
         if j < n and _PRICE.search(ar_to_en_digits(tokens[j])):

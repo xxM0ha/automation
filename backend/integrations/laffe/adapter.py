@@ -6,8 +6,11 @@ One browser, one lock — orders are processed serially, never in parallel.
 When Foodics provides a real API, replace _fill_order() with HTTP calls.
 The BasePOSAdapter interface stays the same.
 """
+import json
 import logging
+import os
 import re
+import time
 from pathlib import Path
 
 from integrations.base.pos_adapter import BasePOSAdapter, POSResult
@@ -24,26 +27,128 @@ logger = logging.getLogger('prime.laffe.adapter')
 FAILURE_DIR = Path(__file__).parent.parent.parent / 'logs' / 'laffe-failures'
 FAILURE_DIR.mkdir(parents=True, exist_ok=True)
 
-# Finds the menu item card by title (disambiguated by closest price among
-# same-name cards) and fires a native click on its clickable ancestor. Used
+# ── Foodics API capture ──────────────────────────────────────────────────────
+# While the bot pushes an order, record every API call the Foodics console makes
+# (method, URL, JSON sent, JSON received) to logs/foodics-capture/, so the order
+# flow can later be re-implemented over HTTP instead of a browser. Tokens,
+# cookies and passwords are redacted. Recording never affects the push itself.
+CAPTURE_DIR = FAILURE_DIR.parent / 'foodics-capture'
+CAPTURE_ENABLED = os.getenv('FOODICS_CAPTURE', '1') == '1'
+CAPTURE_KEEP = 40                # newest capture files kept
+CAPTURE_BODY_LIMIT = 1_000_000   # characters kept per body
+_SECRET_HEADERS = {'authorization', 'cookie', 'set-cookie', 'x-xsrf-token', 'x-csrf-token'}
+_SECRET_KEYS = {'token', 'access_token', 'refresh_token', 'password', 'secret'}
+_SECRET_QUERY = re.compile(r'\b((?:access_)?token|password|secret)=[^&]+', re.I)
+_SECRET_JSON = re.compile(r'"((?:access_|refresh_)?token|password|secret)"\s*:\s*"[^"]*"', re.I)
+
+
+def _redact(value):
+    if isinstance(value, dict):
+        return {k: ('<redacted>' if str(k).lower() in _SECRET_KEYS else _redact(v)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact(v) for v in value]
+    return value
+
+
+def _redact_text(text: str) -> str:
+    text = _SECRET_QUERY.sub(lambda m: m.group(1) + '=<redacted>', text)
+    return _SECRET_JSON.sub(lambda m: f'"{m.group(1)}": "<redacted>"', text)
+
+
+def _decode_body(text):
+    if text is None:
+        return None
+    if len(text) > CAPTURE_BODY_LIMIT:
+        return {'truncated_chars': len(text), 'head': _redact_text(text[:CAPTURE_BODY_LIMIT])}
+    try:
+        return _redact(json.loads(text))
+    except (ValueError, TypeError):
+        return _redact_text(text)
+
+
+class _FoodicsCapture:
+    """Records the Foodics console's XHR/fetch calls on `page` until save()."""
+
+    def __init__(self, page, oid: str, platform: str):
+        self.page, self.oid, self.platform = page, oid, platform
+        self.started = time.time()
+        self.requests = []
+        page.on('requestfinished', self._on_request)
+        page.on('requestfailed', self._on_request)
+
+    def _on_request(self, request):
+        # Runs on Playwright's event dispatcher: cheap property reads only.
+        try:
+            if request.resource_type in ('xhr', 'fetch') and 'foodics' in request.url:
+                self.requests.append((round(time.time() - self.started, 2), request))
+        except Exception:
+            pass
+
+    def _describe(self, t, request) -> dict:
+        call = {
+            't': t,
+            'method': request.method,
+            'url': _redact_text(request.url),
+            'request_headers': {k: ('<redacted>' if k.lower() in _SECRET_HEADERS else v)
+                                for k, v in request.headers.items()},
+            'request_body': _decode_body(request.post_data),
+        }
+        try:
+            response = request.response()
+        except Exception:
+            response = None
+        if response is None:
+            call['failure'] = request.failure
+            return call
+        call['status'] = response.status
+        call['response_type'] = response.headers.get('content-type', '')
+        try:
+            call['response_body'] = _decode_body(response.text())
+        except Exception as e:
+            call['response_body'] = f'<unavailable: {str(e).splitlines()[0][:120]}>'
+        return call
+
+    def save(self, outcome: str) -> None:
+        try:
+            self.page.remove_listener('requestfinished', self._on_request)
+            self.page.remove_listener('requestfailed', self._on_request)
+        except Exception:
+            pass
+        try:
+            calls = [self._describe(t, r) for t, r in self.requests]
+            CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
+            stamp = time.strftime('%Y%m%d-%H%M%S', time.localtime(self.started))
+            path = CAPTURE_DIR / f'{stamp}_{self.platform}_{self.oid}.json'
+            path.write_text(json.dumps({
+                'order': self.oid,
+                'platform': self.platform,
+                'outcome': outcome,
+                'started': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.started)),
+                'calls': calls,
+            }, ensure_ascii=False, indent=1), encoding='utf-8')
+            for old in sorted(CAPTURE_DIR.glob('*.json'))[:-CAPTURE_KEEP]:
+                old.unlink(missing_ok=True)
+            logger.info('[laffe] Captured %d Foodics API calls → %s', len(calls), path.name)
+        except Exception:
+            logger.exception('[laffe] Foodics API capture failed for %s', self.oid)
+
+# Finds the card whose title equals the given one (normalised) and, when a
+# price is given, whose price is exactly that — never a partial title or the
+# closest price — and fires a native click on its clickable ancestor. Used
 # instead of a Playwright click because the card name is mirrored by a hidden
 # line-clamp tooltip clone and the filtered list renders late, both of which
 # break Playwright's actionability checks.
 _CLICK_ITEM_JS = r"""(args) => {
-  const norm = s => (s||'').replace(/[أإآ]/g,'ا').replace(/ـ/g,'').replace(/\s+/g,' ').trim();
+  const norm = s => (s||'').replace(/[\u064B-\u0652\u0670]/g,'').replace(/[أإآ]/g,'ا').replace(/ـ/g,'').replace(/ی/g,'ي').replace(/ک/g,'ك')
+                           .replace(/\s*\(\s*/g,' (').replace(/\s*\)\s*/g,') ').replace(/\s+/g,' ').trim();
   const pdig = s => { const d=(s||'').replace(/[^\d]/g,''); return d?parseInt(d,10):null; };
   const want = norm(args.title);
   const wp = pdig(args.price);
   const els = Array.from(document.querySelectorAll('div.line-clamp-2[title]'));
   let cands = els.filter(e => norm(e.getAttribute('title')) === want);
-  if (!cands.length) cands = els.filter(e => { const n = norm(e.getAttribute('title')); return n && (n.includes(want) || want.includes(n)); });
+  if (wp != null) cands = cands.filter(e => { const c=e.parentElement; const p=c&&c.querySelector('.font-bold'); return pdig(p?p.textContent:'') === wp; });
   if (!cands.length) return false;
-  let chosen = cands[0];
-  if (cands.length > 1 && wp != null) {
-    chosen = cands.map(e => { const c=e.parentElement; const p=c&&c.querySelector('.font-bold'); return {e, pv: pdig(p?p.textContent:'')}; })
-                  .sort((a,b)=>Math.abs((a.pv==null?1e12:a.pv)-wp)-Math.abs((b.pv==null?1e12:b.pv)-wp))[0].e;
-  }
-  const card = chosen.closest('.cursor-pointer') || chosen.parentElement || chosen;
+  const card = cands[0].closest('.cursor-pointer') || cands[0].parentElement || cands[0];
   try { card.scrollIntoView({block:'center'}); } catch (e) {}
   card.click();
   return true;
@@ -157,6 +262,156 @@ def _extract_pos_id(page, order_external_id: str) -> str:
     return ''
 
 
+_BRANCH_IDS = {}     # Foodics branch name -> UUID, resolved once per process
+_CUSTOMER_IDS = {}   # app phone -> customer UUID
+_CREATOR_ID = {}     # our Foodics login email -> user UUID
+
+
+def _api_branches():
+    """Branch slugs pushed through the Foodics API instead of the browser.
+    Empty (the default) means every branch keeps using the browser."""
+    import os
+    raw = os.getenv('FOODICS_API_BRANCHES', '')
+    return {s.strip() for s in raw.split(',') if s.strip()}
+
+
+def _api_push(page, order, items, branch_name, platform_slug):
+    """Create the order through the Foodics API. Returns (reference, meta).
+
+    Raises on any failure EXCEPT one it can prove is harmless, so the caller
+    can fall back to the browser. Before reporting failure it checks whether
+    the order actually landed — a create that errors after writing must never
+    be entered a second time.
+    """
+    from integrations.laffe import foodics_api as api
+    from integrations.laffe.session import EMAIL, PLATFORM_CONFIG
+    import hashlib
+    from datetime import datetime, timezone
+
+    cfg = PLATFORM_CONFIG.get(platform_slug, PLATFORM_CONFIG['toters'])
+    oid = order.external_id
+
+    lines = []
+    for item in (items or []):
+        pid = getattr(item, '_foodics_product_id', '') or ''
+        price = getattr(item, '_foodics_price', None)
+        if not pid or price is None:
+            raise RuntimeError(f'"{item.name_snapshot}" has no Foodics product id/price — browser push')
+        lines.append((pid, item.qty, int(price), (getattr(item, 'notes', '') or '').strip()))
+    if not lines:
+        raise RuntimeError('order has no items')
+
+    branch = _BRANCH_IDS.get(branch_name) or api.branch_id(page, branch_name)
+    if not branch:
+        raise RuntimeError(f'no Foodics branch id for {branch_name!r}')
+    _BRANCH_IDS[branch_name] = branch
+
+    phone = cfg['phone']
+    customer = _CUSTOMER_IDS.get(phone) or api.customer_id(page, phone)
+    if not customer:
+        raise RuntimeError(f'no Foodics customer for {platform_slug} ({phone})')
+    _CUSTOMER_IDS[phone] = customer
+
+    creator = _CREATOR_ID.get(EMAIL) or api.user_id_by_email(page, EMAIL)
+    if not creator:
+        raise RuntimeError(f'cannot resolve the Foodics user for {EMAIL}')
+    _CREATOR_ID[EMAIL] = creator
+
+    order_uuid = api.new_order_id(page)
+    if not order_uuid:
+        raise RuntimeError('Foodics did not issue an order id')
+
+    id_digits = cfg.get('id_digits')
+    display_id = oid[-id_digits:] if id_digits else oid
+    kitchen_notes = f'{cfg["source"]} - {display_id}'
+    if order.notes:
+        kitchen_notes += f'\n{order.notes}'
+
+    payload = api.order_payload(
+        order_id=order_uuid,
+        # Deterministic per ORDO order: a retry of the same order is refused by
+        # Foodics rather than entered twice.
+        idempotency_key=hashlib.md5(f'ordo-{order.id}-{oid}'.encode()).hexdigest()[:10],
+        branch=branch, customer=customer, creator=creator, lines=lines,
+        kitchen_notes=kitchen_notes,
+        opened_at=datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
+    )
+
+    res = api.create_order(page, payload) or {}
+    body = res.get('body') if isinstance(res.get('body'), dict) else {}
+    data = body.get('data') or {}
+    if res.get('status') in (200, 201) and data.get('id'):
+        ref = str(data.get('reference') or '')
+        logger.info('[laffe] Order %s created via API → reference %s (%d lines)', oid, ref, len(lines))
+        return ref, {'method': 'api', 'order_id': order_uuid, 'reference': ref,
+                     'lines': len(lines), 'total': payload['total_price']}
+
+    landed, ref = api.order_exists(page, order_uuid)
+    if landed:
+        logger.warning('[laffe] Order %s: API reported %s but the order IS in Foodics (ref %s) — not retrying',
+                       oid, res.get('status'), ref)
+        return str(ref or ''), {'method': 'api', 'order_id': order_uuid, 'reference': ref,
+                                'recovered': True, 'lines': len(lines)}
+
+    raise RuntimeError(f'API create failed ({res.get("status")}): {str(res.get("body"))[:200]}')
+
+
+def _shadow_calculate(page, branch_name, items):
+    """Price this order through the Foodics API as a dry run — creates nothing.
+
+    Shadow step on the way to pushing orders by API: the browser has already
+    entered the order; here we build the same order from each item's Foodics
+    product id and ask Foodics what it would charge. Comparing that with what
+    we entered proves the ids and the payload before anything switches over.
+    Never raises — a failed dry run must not affect a pushed order.
+    """
+    try:
+        from integrations.laffe import foodics_api as api
+
+        lines, missing = [], []
+        for item in (items or []):
+            pid = getattr(item, '_foodics_product_id', '') or ''
+            price = getattr(item, '_foodics_price', None)
+            if not pid or price is None:
+                missing.append(item.name_snapshot)
+                continue
+            lines.append((pid, item.qty, int(price)))
+
+        if not lines:
+            return {'ran': False, 'reason': 'no line carries a Foodics product id', 'missing': missing}
+
+        bid = _BRANCH_IDS.get(branch_name) or api.branch_id(page, branch_name)
+        if not bid:
+            return {'ran': False, 'reason': f'no Foodics branch id for {branch_name!r}'}
+        _BRANCH_IDS[branch_name] = bid
+
+        res = api.calculate(page, bid, lines) or {}
+        body = res.get('body') if isinstance(res.get('body'), dict) else {}
+        expected = sum(qty * price for _, qty, price in lines)
+        api_total = body.get('total_price')
+        out = {
+            'ran': True,
+            'status': res.get('status'),
+            'lines': len(lines),
+            'missing_product_id': missing,
+            'expected_total': expected,
+            'api_total': api_total,
+            'match': api_total is not None and int(api_total) == int(expected),
+        }
+        if res.get('status') != 200:
+            out['error'] = str(res.get('body'))[:300]
+        logger.info(
+            '[laffe] shadow API dry-run: %s lines=%d expected=%s api=%s%s',
+            'match' if out.get('match') else 'MISMATCH',
+            out['lines'], expected, api_total,
+            f" | unmapped: {missing}" if missing else '',
+        )
+        return out
+    except Exception as e:
+        logger.warning('[laffe] shadow API dry-run failed: %s: %s', type(e).__name__, e)
+        return {'ran': False, 'reason': f'{type(e).__name__}: {e}'[:200]}
+
+
 class LaffeAdapter(BasePOSAdapter):
 
     def push_order(self, order) -> POSResult:
@@ -172,17 +427,48 @@ class LaffeAdapter(BasePOSAdapter):
             # Resolve each item's Foodics category here too — any DB access must
             # happen in this (sync) thread, never inside the Playwright worker.
             self._attach_pos_categories(items, order)
+            # Exact Foodics card price per item (set on the menu page), read here
+            # in the Django thread for the same reason as the category above.
+            for item in items:
+                fp = getattr(getattr(item, 'menu_item', None), 'foodics_price', None)
+                item._foodics_price = int(round(float(fp))) if fp is not None else None
+                # Foodics product id — the API dry run addresses items by id,
+                # never by name. Read here, in the Django thread, like the price.
+                item._foodics_product_id = getattr(
+                    getattr(item, 'menu_item', None), 'foodics_product_id', '') or ''
             worker = get_worker(self.restaurant.id)
+
+            # ── API path ────────────────────────────────────────────────────
+            # When this branch is switched to the API and every line carries a
+            # Foodics product id, the order is CREATED by API and the browser
+            # flow does not run for it — never both, or the branch gets the
+            # order twice. Any failure that provably did NOT write the order
+            # falls through to the browser below.
+            if self.restaurant.slug in _api_branches():
+                branch_name = self._branch_name(order)
+                platform_slug = order.platform.slug if order.platform else 'toters'
+                try:
+                    ref, meta = worker.submit(
+                        lambda page: _api_push(page, order, items, branch_name, platform_slug)
+                    )
+                    return POSResult(ok=True, external_id=ref, failed_items=[], raw=meta)
+                except Exception as e:
+                    logger.warning('[laffe] API push failed for %s — falling back to the browser: %s',
+                                   order.external_id, e)
+
             result = worker.submit(lambda page: self._fill_order(page, order, items))
             if isinstance(result, tuple):
                 pos_id = result[0]
                 failed_items = result[1] if len(result) > 1 else []
                 picks = result[2] if len(result) > 2 else []
+                warnings = result[3] if len(result) > 3 else []
+                shadow = result[4] if len(result) > 4 else None
             else:
-                pos_id, failed_items, picks = result, [], []
+                pos_id, failed_items, picks, warnings, shadow = result, [], [], [], None
             return POSResult(
                 ok=True, external_id=pos_id, failed_items=failed_items,
-                raw={'method': 'search_price', 'picks': picks},
+                raw={'method': 'search_price', 'picks': picks, 'warnings': warnings,
+                     'shadow_api': shadow},
             )
 
         except _ItemsNotFoundInMenu as e:
@@ -233,7 +519,24 @@ class LaffeAdapter(BasePOSAdapter):
             return 'منيو تطبيقات RIZ'
         return 'منيو التطبيقات'
 
-    def _fill_order(self, page, order, items=None) -> str:
+    def _fill_order(self, page, order, items=None):
+        """Run the push steps, recording the Foodics API calls they trigger."""
+        if not CAPTURE_ENABLED:
+            return self._fill_order_steps(page, order, items)
+        platform = order.platform.slug if order.platform else 'toters'
+        capture = _FoodicsCapture(page, order.external_id, platform)
+        outcome = 'error'
+        try:
+            result = self._fill_order_steps(page, order, items)
+            outcome = 'saved'
+            return result
+        except _ItemsNotFoundInMenu:
+            outcome = 'aborted_items_not_found'
+            raise
+        finally:
+            capture.save(outcome)
+
+    def _fill_order_steps(self, page, order, items=None) -> str:
         """
         Fill the order form in Foodics.
         At entry: page is at idle state (pickup selected, توترز chosen).
@@ -297,12 +600,14 @@ class LaffeAdapter(BasePOSAdapter):
         # parsed order item's unit price. Each menu card looks like:
         #   <div title="<name>" class="line-clamp-2 …">…</div>
         #   <div class="mt-auto"><div class="font-bold text-black">IQD 7,000</div>…
-        from difflib import SequenceMatcher
-
         _AR_DIGITS = str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789')
 
         def _norm(s: str) -> str:
-            s = (s or '').replace('أ', 'ا').replace('إ', 'ا').replace('آ', 'ا').replace('ـ', '')
+            s = re.sub(r'[\u064B-\u0652\u0670]', '', s or '')      # tashkeel
+            s = s.replace('أ', 'ا').replace('إ', 'ا').replace('آ', 'ا').replace('ـ', '')
+            s = s.replace('ی', 'ي').replace('ک', 'ك')
+            s = re.sub(r'\s*\(\s*', ' (', s)
+            s = re.sub(r'\s*\)\s*', ') ', s)
             return re.sub(r'\s+', ' ', s).strip()
 
         def _price_to_int(s):
@@ -310,27 +615,20 @@ class LaffeAdapter(BasePOSAdapter):
             return int(digits) if digits else None
 
         # Channel/app tags Foodics appends to per-channel listings of the SAME
-        # item (e.g. "… APP", "… - توترز", "… توصيل"). Stripping them lets a true
-        # variant compare equal to the base name; a card that still differs after
-        # stripping is a DIFFERENT product (e.g. "فنكر رز - توترز" vs "فنكر").
-        _CHANNEL_TAGS = ('app', 'توترز', 'طلبات', 'بلي', 'توصيل', 'لزو', 'يمك', 'يماك')
+        # item ("… APP", "… - توترز", "… (تطبيقات)"). They are the only part of a
+        # card name ignored when matching — see _strict_key.
+        _CHANNEL_TAGS = ('app', 'توترز', 'تطبيقات', 'طلبات', 'بلي', 'توصيل', 'لزو', 'يمك', 'يماك')
 
-        def _name_kind(s: str):
-            """(match_base, had_channel_tag) for a normalised title — match_base is
-            the title with trailing channel tags and flavour parentheticals removed,
-            so per-channel listings of one item collapse to the same base."""
-            def strip_ch(toks):
-                had = False
-                while toks and toks[-1].lower() in _CHANNEL_TAGS:
+        def _strict_key(s: str) -> str:
+            """Name used for matching: normalised (tashkeel, tatweel, alef forms,
+            spacing) with trailing channel tags removed. Two names match only
+            when these keys are EQUAL — no substring, prefix or fuzzy match."""
+            toks = _norm(s).split()
+            while len(toks) > 1 and toks[-1].strip('()').lower() in _CHANNEL_TAGS:
+                toks.pop()
+                if len(toks) > 1 and toks[-1] in ('-', '–'):
                     toks.pop()
-                    had = True
-                    if toks and toks[-1] in ('-', '–'):
-                        toks.pop()
-                return toks, had
-            toks, had1 = strip_ch(s.split())
-            base = re.sub(r'\([^)]*\)', ' ', ' '.join(toks))
-            toks2, had2 = strip_ch(base.split())
-            return re.sub(r'\s+', ' ', ' '.join(toks2)).strip(), (had1 or had2)
+            return ' '.join(toks)
 
         def _search_terms(raw: str):
             """Search terms to try, most-specific first. The parsed name may carry
@@ -393,26 +691,13 @@ class LaffeAdapter(BasePOSAdapter):
             except Exception:
                 return []
 
-        def _candidates_tiered(cards, name: str):
-            """Name-matching cards as [(tier, card)] — tier 0 = exact name,
-            1 = suffix variant ("<name> …"), 2 = substring either way, 3 = fuzzy.
-            Lower tier = better name match (used as the price tie-breaker)."""
-            target = _norm(name)
-            out = []
-            for c in cards:
-                t = _norm(c.get('title'))
-                if t == target:
-                    tier = 0
-                elif t.startswith(target + ' '):
-                    tier = 1
-                elif target and (target in t or t in target):
-                    tier = 2
-                elif SequenceMatcher(None, target, t).ratio() >= 0.82:
-                    tier = 3
-                else:
-                    continue
-                out.append((tier, c))
-            return out
+        def _exact_cards(cards, name: str):
+            """Cards whose name matches `name` exactly (equal _strict_key)."""
+            target = _strict_key(name)
+            return [c for c in cards if target and _strict_key(c.get('title')) == target]
+
+        def _fmt_price(cp):
+            return '؟' if cp is None else f'{cp:,}'
 
         def _goto_grid():
             """Click 'back' until we're at the top menu grid."""
@@ -437,7 +722,7 @@ class LaffeAdapter(BasePOSAdapter):
                 return []
 
         def _enter(menu_title: str) -> bool:
-            """From the grid, click into a menu by title. True if we entered it."""
+            """From the grid, click into the menu with exactly this title. True if we entered it."""
             try:
                 page.evaluate(_CLICK_ITEM_JS, {'title': menu_title, 'price': ''})
                 page.wait_for_timeout(800)
@@ -460,63 +745,54 @@ class LaffeAdapter(BasePOSAdapter):
             _menu_cache[menu] = cards
             return cards
 
-        def _select_and_add(name: str, order_price):
-            """Find the item ACROSS menus and click it. Ranks candidates by
-            (different-product?, price distance, name-match tier):
-              1. A DIFFERENT product — a card carrying a channel/app tag whose
-                 identity still differs from the target after the tag is stripped
-                 (e.g. "فنكر رز - توترز" for "فنكر") — is demoted below every
-                 exact/true-variant match, so it can NEVER win on price alone.
-              2. Among the rest, the closest PRICE wins; ties break to the closest
-                 NAME tier — so a "… APP"/"… - توترز" listing of the SAME item still
-                 beats a wrong-priced exact, and plain 'شاورما' vs 'لفي شاورما'
-                 (no channel tag) is unchanged.
-            Menus are cached per order; we stop early only on a perfect (exact name
-            + exact price) match."""
+        def _select_and_add(name: str, target_price):
+            """Find the Foodics card with the SAME name (see _strict_key) and the
+            EXACT price, across all menus, and click it. Never a similar or
+            partial name and never the closest price: when no card matches both,
+            nothing is clicked and the result carries the reason, so the order is
+            aborted and the branch notified. With no price to match, the name
+            must have a single price in Foodics. Menus are cached per order; the
+            default menu is searched first and the first exact card wins."""
             nonlocal _menu_order
             default = self._menu_category(order)
             if not _menu_order:
                 _menu_order = [default] + [m for m in _menu_titles() if m and m != default]
 
-            tgt_base = _name_kind(_norm(name))[0]
-
-            pool = []   # (demote, price_diff, tier, n_in_menu, card, menu)
+            same_name = []    # (card, menu) — same name, any price
+            hit = None
             for menu in _menu_order:
-                tiered = _candidates_tiered(_cache_menu(menu), name)
-                if not tiered:
-                    continue
-                n = len(tiered)
-                perfect = False
-                for tier, c in tiered:
-                    diff = (abs((c['cp'] if c['cp'] is not None else 10**12) - order_price)
-                            if order_price is not None else 0)
-                    cbase, had_tag = _name_kind(_norm(c['title']))
-                    demote = 1 if (had_tag and cbase != tgt_base) else 0
-                    pool.append((demote, diff, tier, n, c, menu))
-                    if order_price is not None and diff == 0 and tier == 0:
-                        perfect = True
-                if perfect:
-                    break       # exact name + exact price — nothing can beat it
-                if order_price is None:
-                    break       # no price to match → first menu with a name match
+                for c in _exact_cards(_cache_menu(menu), name):
+                    same_name.append((c, menu))
+                    if hit is None and target_price is not None and c['cp'] == target_price:
+                        hit = (c, menu)
+                if hit:
+                    break
+            if hit is None and target_price is None and same_name:
+                if len({c['cp'] for c, _ in same_name}) == 1 and same_name[0][0]['cp'] is not None:
+                    hit = same_name[0]
 
-            if not pool:
+            if hit is None:
+                if not same_name:
+                    reason = 'لا يوجد صنف بنفس الاسم في Foodics'
+                elif target_price is None:
+                    reason = 'لا يوجد سعر للمطابقة والصنف بأكثر من سعر في Foodics'
+                else:
+                    found = '، '.join(sorted({_fmt_price(c['cp']) for c, _ in same_name}))
+                    reason = f'موجود في Foodics بسعر {found} فقط'
+                logger.warning('[laffe] "%s" @ %s: no exact Foodics card — %s', name, target_price, reason)
                 return ({'matched': False, 'title': None, 'price_text': '', 'chosen': None,
-                         'chosen_price': None, 'candidates': 0, 'by_price': False, 'exact': False}, False)
+                         'chosen_price': None, 'candidates': len(same_name), 'by_price': False,
+                         'exact': False, 'reason': reason}, False)
 
-            pool.sort(key=lambda x: (x[0], x[1], x[2]))   # different-product, price, tier
-            demote, diff, tier, n, card, menu = pool[0]
-            exact = (order_price is not None and diff == 0)
-
+            card, menu = hit
             _goto_grid()
-            _enter(menu)
-            clicked = _click_item(card['title'], card['price'])
-            logger.info('[laffe] "%s": picked %r @ %r (tier %d, %s) in menu %r',
-                        name, card['title'], card['price'], tier,
-                        'exact price' if exact else 'closest', menu)
+            clicked = _enter(menu) and _click_item(card['title'], card['price'])
+            logger.info('[laffe] "%s": picked %r @ %r in menu %r (exact name + price)',
+                        name, card['title'], card['price'], menu)
             return ({'matched': True, 'title': card['title'], 'price_text': card['price'],
                      'chosen': card['title'], 'chosen_price': card['cp'],
-                     'candidates': n, 'by_price': n > 1, 'exact': exact}, clicked)
+                     'candidates': len(same_name), 'by_price': len(same_name) > 1, 'exact': True,
+                     'reason': '' if clicked else 'تعذّر الضغط على الصنف في Foodics'}, clicked)
 
         def _click_item(title: str, price_text: str) -> bool:
             """Click the chosen item card via JavaScript. Playwright's actionable
@@ -532,6 +808,7 @@ class LaffeAdapter(BasePOSAdapter):
         # Add each item
         failed_items = []
         picks = []  # per-item diagnostics for the dev page
+        push_warnings = []  # non-fatal problems (e.g. notes not written) → branch alert
 
         for item in (items or []):
             # Strip internal ` APP` suffix — Foodics menu items don't carry it.
@@ -545,31 +822,36 @@ class LaffeAdapter(BasePOSAdapter):
                     order_price = int(round(float(item.unit_price)))
             except Exception:
                 order_price = None
+            # The menu's Foodics price, when set, is the price of the exact card
+            # to pick; otherwise match against the price the app charged.
+            foodics_price = getattr(item, '_foodics_price', None)
+            target_price = foodics_price if foodics_price is not None else order_price
             pick = {
                 'item': item.name_snapshot, 'qty': item.qty, 'order_price': order_price,
+                'foodics_price': foodics_price,
                 'candidates': 0, 'chosen': None, 'chosen_price': None,
                 'by_price': False, 'ok': False,
             }
             picks.append(pick)
 
             try:
-                # Search across menus for the item, preferring an EXACT price
-                # match (the same item can exist in several menus at different
-                # prices); clicks it. Falls back to the closest price.
-                res, clicked = _select_and_add(search_name, order_price)
+                # Exact name + exact price across all menus (the same item can
+                # exist in several menus at different prices). No fallback.
+                res, clicked = _select_and_add(search_name, target_price)
                 pick.update({
                     'candidates': res.get('candidates', 0),
                     'chosen': res.get('chosen'),
                     'chosen_price': res.get('chosen_price'),
                     'by_price': res.get('by_price', False),
+                    'exact': res.get('exact', False),
                 })
                 if not res.get('matched') or not clicked:
                     snap(f'4_item_failed_{search_name[:20]}')
-                    logger.warning(
-                        '[laffe] Item not added: %s (matched=%s, chosen=%r)',
-                        item.name_snapshot, res.get('matched'), res.get('chosen'),
-                    )
-                    failed_items.append(item.name_snapshot)
+                    reason = res.get('reason') or 'تعذّر إضافة الصنف'
+                    wanted = f' بسعر {_fmt_price(target_price)}' if target_price is not None else ''
+                    logger.warning('[laffe] Item not added: %s%s — %s', item.name_snapshot, wanted, reason)
+                    pick['reason'] = reason
+                    failed_items.append(f'{item.name_snapshot}{wanted}: {reason}')
                     continue
                 page.wait_for_timeout(800)
 
@@ -612,8 +894,10 @@ class LaffeAdapter(BasePOSAdapter):
                                         notes_input.fill(item.notes)
                                     else:
                                         logger.warning('[laffe] Item notes field not found for %s', item.name_snapshot)
+                                        push_warnings.append(f'لم تُضف ملاحظة الصنف «{item.name_snapshot}»: {item.notes}')
                                 except Exception:
                                     logger.warning('[laffe] Could not fill item notes for %s', item.name_snapshot)
+                                    push_warnings.append(f'لم تُضف ملاحظة الصنف «{item.name_snapshot}»: {item.notes}')
                             btn.click()
                             page.wait_for_timeout(600)
                             break
@@ -633,7 +917,7 @@ class LaffeAdapter(BasePOSAdapter):
                 snap(f'4_item_failed_{search_name[:20]}')
                 logger.warning('[laffe] Could not find item in Foodics menu: %s', item.name_snapshot)
                 pick['ok'] = False
-                failed_items.append(item.name_snapshot)
+                failed_items.append(f'{item.name_snapshot}: خطأ أثناء إضافة الصنف في Foodics')
                 continue
             logger.debug('[laffe] Added item: %s x%s', item.name_snapshot, item.qty)
 
@@ -671,20 +955,11 @@ class LaffeAdapter(BasePOSAdapter):
                 notes_field.fill(kitchen_notes)
             else:
                 snap('5_notes_field_not_found')
-                try:
-                    from notifications_app.models import Notification
-                    Notification.objects.create(
-                        restaurant=order.restaurant,
-                        title=f'تحذير — طلب #{oid} لم تُضف ملاحظات المطبخ',
-                        body=f'تعذّر إيجاد حقل ملاحظات المطبخ في Foodics.\nيرجى إضافة الملاحظة يدوياً:\n\n{kitchen_notes}',
-                        type='alert',
-                        related_order=order,
-                    )
-                except Exception:
-                    logger.exception('[laffe] Failed to create notes-missing notification for order %s', oid)
+                push_warnings.append(f'تعذّر إيجاد حقل ملاحظات المطبخ في Foodics — يرجى إضافتها يدوياً:\n{kitchen_notes}')
         except Exception:
             snap('5_notes_failed')
             logger.warning('[laffe] Could not fill notes for order %s', oid)
+            push_warnings.append(f'تعذّر كتابة ملاحظات المطبخ في Foodics — يرجى إضافتها يدوياً:\n{kitchen_notes}')
 
         # Save the order
         try:
@@ -696,7 +971,10 @@ class LaffeAdapter(BasePOSAdapter):
         snap('7_done')
         pos_id = _extract_pos_id(page, oid)
         logger.info('[laffe] Order %s → Foodics ID: %s', oid, pos_id or '(unknown)')
-        return pos_id, failed_items, picks
+        # Dry-run the same order through the Foodics API (creates nothing) so we
+        # can compare its total with what we just entered by hand.
+        shadow = _shadow_calculate(page, self._branch_name(order), items)
+        return pos_id, failed_items, picks, push_warnings, shadow
 
     def update_order_status(self, order, new_status: str) -> POSResult:
         logger.info('[laffe] update_order_status stub: %s → %s', order.external_id, new_status)

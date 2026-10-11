@@ -88,7 +88,7 @@ export const NotificationsPage = ({ setPage }: NotificationsPageProps) => {
     setLinkMsg(null);
     try {
       const res = await notifApi.linkItem(u.platform, u.name, itemId);
-      const extra = res.reprocessed > 0 ? ` — أُعيد إرسال ${res.reprocessed} طلب` : '';
+      const extra = res.cleared > 0 ? ` — أُزيل ${res.cleared} تنبيه` : '';
       setLinkMsg(`تم ربط «${u.name}» بـ «${res.itemName}»${extra}`);
       await fetchUnlinked();
     } catch {
@@ -167,7 +167,7 @@ export const NotificationsPage = ({ setPage }: NotificationsPageProps) => {
             ) : (
               <>
                 <p className="px-5 pt-3 text-xs text-on-surface-variant">
-                  هذه الأصناف وصلت في طلبات لكنها غير مرتبطة بأي صنف في القائمة. اختر الصنف المطابق (أو أكّد الاقتراح الذكي) واضغط «ربط» — سيُحفظ كمرادف وتُعاد الطلبات المعلّقة تلقائياً.
+                  هذه الأصناف وصلت في طلبات لكنها غير مرتبطة بأي صنف في القائمة. اختر الصنف المطابق (أو أكّد الاقتراح الذكي) واضغط «ربط» — سيُحفظ كمرادف للطلبات القادمة فقط، ولن يُرسل أي طلب قديم إلى Foodics.
                 </p>
                 {linkMsg && (
                   <p className="mx-5 mt-2 text-xs font-semibold text-forest bg-forest/10 rounded-lg px-3 py-2">{linkMsg}</p>

@@ -39,6 +39,9 @@ export interface MenuItem {
   platformNames: Record<string, string>;
   platformAliases: Record<string, string[]>;
   platformPosCategories: Record<string, string>;
+  foodicsPrice?: number | null;
+  /** Foodics product UUID — empty when the item isn't linked to a Foodics product. */
+  foodicsProductId?: string;
 }
 
 export interface ChartDataPoint {

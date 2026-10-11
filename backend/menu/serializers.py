@@ -22,13 +22,15 @@ class MenuItemSerializer(serializers.ModelSerializer):
     price_display = serializers.SerializerMethodField()
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     price = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, default=0)
+    foodics_price = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, allow_null=True)
 
     class Meta:
         model = MenuItem
         fields = [
             'id', 'name', 'price', 'price_display', 'description', 'image',
             'tag', 'status', 'status_display', 'is_available', 'stock_level',
-            'category', 'category_name', 'platforms', 'platform_mappings', 'pos_category', 'created_at',
+            'category', 'category_name', 'platforms', 'platform_mappings', 'pos_category', 'foodics_price',
+            'foodics_product_id', 'created_at',
         ]
 
     def get_platforms(self, obj):

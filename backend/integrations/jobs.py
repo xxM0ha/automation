@@ -18,7 +18,8 @@ STALE_PUSH_MINUTES = int(os.getenv('STALE_PUSH_MINUTES', '30'))
 def push_order_to_pos(order_id: int):
     """
     Background job: push a new order to the restaurant's POS via the adapter.
-    Retried up to 3 times by django-q on failure.
+    Never retried: a failure records pos_error and alerts the branch once,
+    because a retry could enter the order into Foodics twice.
     """
     try:
         order = Order.objects.select_related('restaurant', 'platform').get(pk=order_id)
@@ -90,21 +91,34 @@ def push_order_to_pos(order_id: int):
                     )
                 except Exception:
                     logger.exception('[integrations] Failed to create failed-items notification for order %s', order.external_id)
+            warnings = (result.raw or {}).get('warnings') or []
+            if warnings:
+                try:
+                    from notifications_app.models import Notification
+                    Notification.objects.create(
+                        restaurant=order.restaurant,
+                        title=f'تحذير — طلب #{order.external_id} أُرسل بملاحظات ناقصة',
+                        body='تم إرسال الطلب إلى Foodics لكن:\n\n' + '\n\n'.join(f'• {w}' for w in warnings),
+                        type='alert',
+                        related_order=order,
+                    )
+                except Exception:
+                    logger.exception('[integrations] Failed to create push-warnings notification for order %s', order.external_id)
         elif result.failed_items:
             # Items not found in Foodics menu — notify and stop, don't retry
             logger.warning(
                 '[integrations] Order %s aborted — items not in Foodics menu: %s',
                 order.external_id, result.failed_items,
             )
-            order.pos_error = 'أصناف غير موجودة في Foodics: ' + '، '.join(result.failed_items)
+            order.pos_error = 'أصناف لم تُطابق في Foodics: ' + ' | '.join(result.failed_items)
             order.save(update_fields=['pos_error'])
             try:
                 from notifications_app.models import Notification
                 items_list = '\n'.join(f'• {name}' for name in result.failed_items)
                 Notification.objects.create(
                     restaurant=order.restaurant,
-                    title=f'تحذير — طلب #{order.external_id} أصناف غير موجودة في Foodics',
-                    body=f'لم يتم إرسال الطلب.\nالأصناف التالية غير موجودة في القائمة:\n\n{items_list}\n\nيرجى إدخال الطلب يدوياً.',
+                    title=f'تحذير — طلب #{order.external_id} لم يُرسل: أصناف لم تُطابق في Foodics',
+                    body=f'لم يتم إرسال الطلب.\nلا يوجد في Foodics صنف بنفس الاسم والسعر لـ:\n\n{items_list}\n\nيرجى إدخال الطلب يدوياً.',
                     type='alert',
                     related_order=order,
                 )
@@ -115,15 +129,34 @@ def push_order_to_pos(order_id: int):
                 '[integrations] POS push failed for order %s: %s',
                 order.external_id, result.error,
             )
-            raise RuntimeError(result.error)
+            _record_push_error(order, result.error)
     except Exception as e:
-        try:
-            order.pos_error = str(e)[:1000]
-            order.save(update_fields=['pos_error'])
-        except Exception:
-            pass
         logger.exception('[integrations] push_order_to_pos error for order %s', order_id)
-        raise  # Let django-q retry
+        _record_push_error(order, str(e))
+        # Not re-raised: a django-q retry could enter the order into Foodics twice.
+
+
+def _record_push_error(order, error):
+    """Store the push error on the order and alert the branch once."""
+    error = (error or '').strip() or 'خطأ غير معروف'
+    try:
+        order.pos_error = error[:1000]
+        order.save(update_fields=['pos_error'])
+    except Exception:
+        logger.exception('[integrations] Failed to save pos_error for order %s', order.external_id)
+    try:
+        from notifications_app.models import Notification
+        Notification.objects.create(
+            restaurant=order.restaurant,
+            title=f'خطأ — طلب #{order.external_id} لم يُرسل إلى Foodics',
+            body=(f'السبب: {error[:500]}\n\n'
+                  f'لم تتم إعادة المحاولة تلقائياً لتفادي الإدخال المكرر.\n'
+                  f'يرجى التحقق من Foodics وإدخال الطلب يدوياً إن لم يكن موجوداً.'),
+            type='alert',
+            related_order=order,
+        )
+    except Exception:
+        logger.exception('[integrations] Failed to create push-error notification for order %s', order.external_id)
 
 
 def sync_platform_menu(restaurant_id: int, platform_slug: str):

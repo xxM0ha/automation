@@ -3,6 +3,8 @@
 Shared by the clone_restaurant management command's intent and the
 "create branch → clone from existing" flow in the branches API.
 """
+from collections import Counter, defaultdict
+
 from integrations.models import RestaurantPlatform
 from menu.models import (
     MenuCategory, MenuItem, MenuItemPlatform, MenuItemPlatformAlias,
@@ -108,17 +110,41 @@ def sync_branch_menu(source, target):
             tc.sort_order = c.sort_order
             tc.save(update_fields=['sort_order'])
 
-    # Items — match by name, create or update.
-    tgt_items = {it.name: it for it in MenuItem.objects.filter(restaurant=target)}
-    for si in MenuItem.objects.filter(restaurant=source).prefetch_related('platform_mappings__aliases'):
+    # Items — matched by name. When the source has several items with the same
+    # name (e.g. one per app, each priced for its own Foodics price list), each
+    # copy is paired with the target item carrying the same app names, and a copy
+    # with no counterpart is created — so the target keeps them apart instead of
+    # folding them into one item.
+    def app_names(item):
+        return frozenset(
+            (mp.platform_id, n)
+            for mp in item.platform_mappings.all()
+            for n in [mp.platform_name, *(al.name for al in mp.aliases.all())]
+            if n
+        )
+
+    src_items = list(MenuItem.objects.filter(restaurant=source).prefetch_related('platform_mappings__aliases'))
+    src_name_count = Counter(si.name for si in src_items)
+    tgt_by_name = defaultdict(list)
+    for it in MenuItem.objects.filter(restaurant=target).prefetch_related('platform_mappings__aliases'):
+        tgt_by_name[it.name].append(it)
+    claimed = set()
+
+    for si in src_items:
         cat = tgt_cats.get(si.category.name_ar) if si.category_id else None
-        ti = tgt_items.get(si.name)
+        same_name = tgt_by_name.get(si.name, [])
+        if src_name_count[si.name] == 1:
+            ti = same_name[-1] if same_name else None
+        else:
+            sig = app_names(si)
+            ti = next((t for t in same_name if t.pk not in claimed and app_names(t) == sig), None)
         if ti is None:
             ti = MenuItem.objects.create(
                 restaurant=target, category=cat, name=si.name,
+                foodics_price=si.foodics_price,
                 **{f: getattr(si, f) for f in _SYNC_FIELDS},
             )
-            tgt_items[si.name] = ti
+            tgt_by_name[si.name].append(ti)
             counts['created'] += 1
         else:
             changed = False
@@ -126,12 +152,17 @@ def sync_branch_menu(source, target):
                 if getattr(ti, f) != getattr(si, f):
                     setattr(ti, f, getattr(si, f))
                     changed = True
+            # Copy the Foodics price, but never erase one the target already has.
+            if si.foodics_price is not None and ti.foodics_price != si.foodics_price:
+                ti.foodics_price = si.foodics_price
+                changed = True
             if cat is not None and ti.category_id != cat.id:
                 ti.category = cat
                 changed = True
             if changed:
                 ti.save()
                 counts['updated'] += 1
+        claimed.add(ti.pk)
 
         # Per-platform mappings + aliases.
         for mp in si.platform_mappings.all():

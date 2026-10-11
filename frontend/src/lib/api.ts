@@ -251,6 +251,9 @@ export interface ApiMenuItem {
   category: number;
   categoryName: string;
   posCategory: string;
+  foodicsPrice: string | null;
+  /** Foodics product UUID — empty string when the item isn't linked yet. */
+  foodicsProductId: string;
   platforms: string[];
   platformMappings: ApiMenuItemPlatformMapping[];
 }
@@ -261,8 +264,37 @@ export interface ApiMenuCategory {
   sortOrder: number;
 }
 
+/** An item in another branch, as offered by the import picker. */
+export interface ApiImportItem {
+  id: number;
+  name: string;
+  categoryName: string;
+  foodicsPrice: string | null;
+  apps: { platform: string; name: string; aliases: string[] }[];
+  /** This branch already has it (same name AND same Foodics price). */
+  exists: boolean;
+  /** Same name here but a different Foodics price — importing adds a second copy. */
+  sameNameDifferentPrice: boolean;
+}
+
+export interface ImportResult {
+  created: number;
+  updated: number;
+  skipped: number;
+  categories: number;
+  mappings: number;
+  aliases: number;
+  items: { id: number; name: string; action: string; targetId?: number }[];
+}
+
 export const menu = {
   items: () => get<{ results: ApiMenuItem[]; count: number } | ApiMenuItem[]>('/menu/items/'),
+  importSource: (branch: string) =>
+    get<{ branch: string; name: string; items: ApiImportItem[] }>(
+      `/menu/import/source/?branch=${encodeURIComponent(branch)}`,
+    ),
+  importItems: (data: { branch: string; itemIds: number[]; updateExisting?: boolean }) =>
+    post<ImportResult>('/menu/import/', data),
   categories: () => get<{ results: ApiMenuCategory[]; count: number } | ApiMenuCategory[]>('/menu/categories/'),
   createCategory: (nameAr: string) => post<ApiMenuCategory>('/menu/categories/', { name_ar: nameAr, sort_order: 0 }),
   toggleAvailability: (id: number) =>
@@ -312,7 +344,7 @@ export const notifications = {
   unlinkedItems: () =>
     get<{ results: ApiUnlinkedItem[]; count: number }>('/notifications/unlinked-items/'),
   linkItem: (platform: string, name: string, menuItemId: number) =>
-    post<{ mapped: boolean; itemName: string; reprocessed: number }>('/notifications/link-item/', {
+    post<{ mapped: boolean; itemName: string; cleared: number }>('/notifications/link-item/', {
       platform, name, menuItemId,
     }),
   markRead: (id: number) => patch<ApiNotification>(`/notifications/${id}/read/`, {}),

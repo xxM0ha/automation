@@ -140,8 +140,11 @@ def unlinked_items(request):
 @api_view(['POST'])
 def link_item(request):
     """Map a platform item name to one of our menu items (from the unlinked-items
-    panel — usually confirming a Gemini suggestion), then re-run any held orders
-    that were rejected only because of that name so they push to Foodics.
+    panel — usually confirming a Gemini suggestion) and clear that name's cards.
+
+    The rejected orders are NEVER re-sent: by the time a name is linked the
+    branch has already entered those orders by hand, so pushing them would
+    double-enter them in Foodics. Linking only fixes matching for FUTURE orders.
 
     Body: { platform: slug, name: str, menuItemId: int }
     """
@@ -177,36 +180,16 @@ def link_item(request):
         elif mapping.platform_name.strip() != name:
             MenuItemPlatformAlias.objects.get_or_create(mapping=mapping, name=name)
 
-    # Re-run held orders that included this name and are still unmatched.
-    reprocessed = 0
-    held = (WebhookRejection.objects
-            .filter(restaurant=restaurant, platform=platform, reason=UNLINKED_REASON)
-            .order_by('created_at'))
-    for rej in held:
+    # Clear this name's cards from the panel. The orders behind them are left
+    # alone — never re-submitted, never pushed to Foodics.
+    cleared = 0
+    for rej in (WebhookRejection.objects
+                .filter(restaurant=restaurant, platform=platform, reason=UNLINKED_REASON)
+                .order_by('created_at')):
         if name in (rej.items or []):
-            if _reprocess_rejection(rej):
-                rej.delete()
-                reprocessed += 1
+            rej.delete()
+            cleared += 1
 
-    return Response({'mapped': True, 'item_name': item.name, 'reprocessed': reprocessed})
+    return Response({'mapped': True, 'item_name': item.name, 'cleared': cleared})
 
 
-def _reprocess_rejection(rej):
-    """Re-submit a held order's raw_text through the webhook pipeline. Returns
-    True if it was accepted (order created / already exists) so the caller can
-    clear the rejection."""
-    try:
-        from rest_framework.test import APIRequestFactory
-        from integrations.webhook_views import receive_webhook
-        rf = APIRequestFactory()
-        req = rf.post('/api/webhooks/', {
-            'platform': rej.platform.slug,
-            'restaurant': rej.restaurant.slug,
-            'raw_text': rej.raw_text,
-        }, format='json')
-        resp = receive_webhook(req)
-        return getattr(resp, 'status_code', 500) == 200
-    except Exception:
-        import logging
-        logging.getLogger('prime.notifications').exception('[link] reprocess failed')
-        return False
