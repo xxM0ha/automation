@@ -1,0 +1,34 @@
+# Used by EAS Build INSTEAD of every .gitignore in this repo. EAS uploads from the
+# repository root, so this file must live here (one inside App/ is not read).
+#
+# Purpose: google-services.json is gitignored (it must never be committed), but
+# the Android build cannot run without it — so the build upload is defined here
+# rather than by git: only the App/ folder goes up, including that one file.
+
+# Nothing but the mobile app is needed to build it.
+/*
+!/App
+
+# Inside App/: everything App/.gitignore excludes, except google-services.json.
+App/node_modules/
+App/.expo/
+App/dist/
+App/web-build/
+App/expo-env.d.ts
+App/android/
+App/ios/
+App/.kotlin/
+*.orig.*
+*.jks
+*.keystore
+*.p8
+*.p12
+*.key
+*.mobileprovision
+.metro-health-check*
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+.DS_Store
+**/.env
+**/.env.*
