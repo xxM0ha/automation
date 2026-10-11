@@ -11,6 +11,7 @@ import PrimeNative, { type EngineStatePayload } from '../../modules/prime-native
 import { loadCachedConfig } from '../automation/configApi';
 import { loadSession, type Session } from './auth';
 import { getSelectedApp } from './deviceApp';
+import { configureDeviceLogFromStoredSession, reportCaught, reportDeviceError } from './deviceLog';
 
 type MenuItemPush = { name: string; available: boolean };
 
@@ -33,6 +34,7 @@ export async function getFcmToken(): Promise<string | null> {
   } catch (e) {
     // eslint-disable-next-line no-console
     console.log('[fcm] getToken error:', String(e));
+    reportCaught('تعذّر الحصول على رمز الإشعارات (FCM)', e);
     return null;
   }
 }
@@ -53,10 +55,12 @@ export async function registerDevice(session: Session): Promise<boolean> {
     });
     // eslint-disable-next-line no-console
     console.log('[fcm] register status:', res.status);
+    if (!res.ok) reportDeviceError(`فشل تسجيل الجهاز للإشعارات · HTTP ${res.status}`);
     return res.ok;
   } catch (e) {
     // eslint-disable-next-line no-console
     console.log('[fcm] register error:', String(e));
+    reportCaught('تعذّر تسجيل الجهاز للإشعارات', e);
     return false;
   }
 }
@@ -121,8 +125,14 @@ function runTaskToCompletion(task: Record<string, unknown>): Promise<void> {
     });
     // Safety net: never wedge the queue if no terminal state ever arrives.
     // Starting the next run cancels this slug's stuck coroutine natively.
-    const timer = setTimeout(finish, 90000);
-    PrimeNative!.startEngine(task).catch(() => finish());
+    const timer = setTimeout(() => {
+      reportDeviceError('مزامنة القائمة لم تنتهِ خلال 90 ثانية', slug);
+      finish();
+    }, 90000);
+    PrimeNative!.startEngine(task).catch((e) => {
+      reportCaught('تعذّر بدء مزامنة القائمة', e, slug);
+      finish();
+    });
   });
 }
 
@@ -152,11 +162,15 @@ async function drainMenuQueue(): Promise<void> {
 /** Handle a received menuSync push by queuing the items for the menu task. */
 export async function handleMenuSyncPush(data: MenuSyncPush | undefined): Promise<void> {
   if (!data || data.type !== 'menuSync' || !data.platform) return;
+  // A background push can arrive with no React tree mounted, so make sure the
+  // error log knows the account before this run can fail.
+  await configureDeviceLogFromStoredSession();
   let items: MenuItemPush[] = [];
   try {
     const parsed = JSON.parse(data.items || '[]');
     if (Array.isArray(parsed)) items = parsed as MenuItemPush[];
-  } catch {
+  } catch (e) {
+    reportCaught('إشعار مزامنة القائمة غير صالح', e, `${data.platform}_menu`);
     items = [];
   }
   // Surface exactly what the backend pushed (the in-app names the flow will

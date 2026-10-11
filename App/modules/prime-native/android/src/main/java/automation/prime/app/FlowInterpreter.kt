@@ -68,6 +68,12 @@ class FlowInterpreter(
         true
       } catch (e: CancellationException) {
         throw e
+      } catch (e: FlowRestart) {
+        // Not a failure: another task used the screen while this one was only
+        // watching. Start the flow over so the app is brought back to the
+        // screen this flow watches.
+        onLog("info", "استُخدمت الشاشة لمهمة أخرى — إعادة بدء التدفق", 0)
+        continue
       } catch (e: StepFailure) {
         onLog("error", "فشل التدفق · ${e.message}", 0)
         recoverToMain()
@@ -200,10 +206,41 @@ class FlowInterpreter(
           }
         }
         try {
+          // Watching only reads the screen, so give the screen up while idle:
+          // a menu on/off run can then take its turn without waiting for the
+          // next order. The moment the trigger shows, take the screen back and
+          // keep it to the end of the iteration — from there the order owns
+          // the screen and a menu run waits for it.
+          if (lockHeld) {
+            ScreenLock.release(token)
+            lockHeld = false
+          }
+          var baseline = ScreenLock.acquisitions
           var found = false
           while (isActive && !found) {
-            found = withContext(Dispatchers.IO) { service.waitForElement(sel, intervalMs) }
-            if (!found) delay(50)
+            if (ScreenLock.acquisitions != baseline) {
+              // Another task used the screen. Let it finish, then start over.
+              while (isActive && ScreenLock.isHeld) delay(200)
+              throw FlowRestart()
+            }
+            val seen = withContext(Dispatchers.IO) { service.waitForElement(sel, intervalMs) }
+            if (!seen) {
+              delay(50)
+              continue
+            }
+            ScreenLock.acquire(token, priority) { false }
+            lockHeld = true
+            if (ScreenLock.acquisitions != baseline + 1) {
+              // Another task slipped in between the sighting and our turn.
+              throw FlowRestart()
+            }
+            // Confirm under the lock: what we saw may have been mid-transition.
+            found = withContext(Dispatchers.IO) { service.exists(sel) }
+            if (!found) {
+              ScreenLock.release(token)
+              lockHeld = false
+              baseline = ScreenLock.acquisitions
+            }
           }
           if (found) onLog("success", "ظهر · $key", depth)
         } finally {
@@ -466,16 +503,24 @@ class FlowInterpreter(
         connection.connectTimeout = 10_000
         connection.readTimeout = 10_000
         connection.outputStream.use { it.write(toJsonString(payload).toByteArray(Charsets.UTF_8)) }
-        val text = if (connection.responseCode in 200..299) {
+        val code = connection.responseCode
+        val text = if (code in 200..299) {
           connection.inputStream.bufferedReader().use { it.readText() }
         } else {
-          "{\"ok\":false,\"status\":${connection.responseCode}}"
+          // 422 / 403 are the server's own verdict on the order (unmatched
+          // items, app not connected) and are already recorded there. Any
+          // other status means the order did not get through.
+          if (code != 422 && code != 403) {
+            onLog("error", "لم يصل الطلب إلى الخادم · HTTP $code · $endpoint", 0)
+          }
+          "{\"ok\":false,\"status\":$code}"
         }
         parseJson(text)
       } finally {
         connection.disconnect()
       }
     } catch (e: Exception) {
+      onLog("error", "تعذّر الاتصال بالخادم لإرسال الطلب · ${e.javaClass.simpleName}: ${e.message}", 0)
       mapOf("ok" to false, "error" to (e.message ?: "unknown"))
     }
   }
@@ -578,6 +623,9 @@ class FlowInterpreter(
 
   /** Thrown when a step cannot complete (missing selector, element not found). */
   class StepFailure(message: String) : Exception(message)
+
+  /** Thrown from a watch when another task used the screen meanwhile; see runLoop. */
+  class FlowRestart : Exception("flow restart")
 
   companion object {
     private val INTERP_REGEX = Regex("""\{\{\s*([^}]+?)\s*\}\}""")

@@ -15,6 +15,7 @@ import { useDeviceApp } from '../state/DeviceAppContext';
 import { useSession } from '../state/SessionContext';
 import { createDryRunExecutor } from './dryRunExecutor';
 import { runLoop, type RunLogEntry } from './interpreter';
+import { reportDeviceError } from '../lib/deviceLog';
 
 const MAX_LOG_ENTRIES = 200;
 
@@ -218,6 +219,7 @@ export function EngineProvider({ children }: { children: ReactNode }) {
         // Fire-and-forget — onEngineLog/onEngineState drive UI updates.
         PrimeNative.startEngine(taskConfig).catch((err) => {
           const message = err instanceof Error ? err.message : String(err);
+          reportDeviceError(`تعذّر بدء المحرّك · ${message}`, slug);
           patch(slug, { status: 'error', mode: null, lastError: message });
           delete handles.current[slug];
         });

@@ -56,6 +56,13 @@ declare class PrimeNativeModule extends NativeModule<PrimeNativeModuleEvents> {
   pauseEngine(platform: string): Promise<void>;
   resumeEngine(platform: string): Promise<void>;
 
+  /**
+   * Device error log. `configureDeviceLog` sets where errors are uploaded
+   * (nulls clear it on logout); `reportDeviceError` records one from JS.
+   */
+  configureDeviceLog(baseUrl: string | null, token: string | null): Promise<void>;
+  reportDeviceError(platform: string, kind: string, message: string): Promise<void>;
+
   /** Start/stop the foreground service that keeps the engine alive. */
   startEngineService(label: string): Promise<void>;
   stopEngineService(): Promise<void>;

@@ -76,47 +76,93 @@ def send_menu_sync(restaurant, platform_slug, items):
     return {'sent': sent, 'failures': failures}
 
 
-def push_item_availability(item):
-    """Push one menu item's current availability to every connected platform.
+# FCM caps a data message at 4 KB. Item names are Arabic (escaped to \uXXXX in
+# JSON), so a long list is split into several messages; the app queues them and
+# runs them as one batch.
+_MAX_ITEMS_JSON = 2800
 
-    The automation toggles the item *inside the delivery app*, so it must search
-    by the item's name as it appears in that app — never the panel's canonical
-    name. For each connected platform we therefore use the platform-specific
-    name: the mapping's ``platform_name``, else its first alias. The panel name
-    (``item.name``) is only a last resort when no in-app name was configured.
+
+def _chunks(items):
+    """Split [{name, available}] so each chunk's JSON fits one FCM message."""
+    chunk, size = [], 2
+    for it in items:
+        n = len(json.dumps(it)) + 2
+        if chunk and size + n > _MAX_ITEMS_JSON:
+            yield chunk
+            chunk, size = [], 2
+        chunk.append(it)
+        size += n
+    if chunk:
+        yield chunk
+
+
+def push_items_availability(items):
+    """Push the current availability of several menu items (all of one
+    restaurant) to every connected platform — ONE message per platform
+    carrying the whole list, so the device toggles them in a single run instead
+    of one run per item.
+
+    The automation toggles each item *inside the delivery app*, so it must
+    search by the item's name as it appears in that app — never the panel's
+    canonical name. For each connected platform we therefore use the
+    platform-specific name: the mapping's ``platform_name``, else its first
+    alias. The panel name (``item.name``) is only a last resort when no in-app
+    name was configured.
     """
-    from .models import RestaurantPlatform
+    from .models import PendingMenuSync, RestaurantPlatform
 
-    restaurant = item.restaurant
+    items = list(items)
+    if not items:
+        return {}
+    restaurant = items[0].restaurant
+    connected = {
+        rp.platform_id: rp.platform
+        for rp in RestaurantPlatform.objects
+        .filter(restaurant=restaurant, is_connected=True).select_related('platform')
+    }
+
+    by_platform = {}   # slug -> (platform, [{name, available}])
+    for item in items:
+        for m in item.platform_mappings.all():
+            platform = connected.get(m.platform_id)
+            if platform is None:
+                continue
+            alias_names = [a.name for a in m.aliases.all()]
+            in_app_name = m.platform_name or (alias_names[0] if alias_names else '')
+            if not in_app_name:
+                logger.warning(
+                    '[fcm] item %s has no in-app name for %s; falling back to panel name "%s"',
+                    item.id, platform.slug, item.name,
+                )
+            entry = {'name': in_app_name or item.name, 'available': item.is_available}
+            by_platform.setdefault(platform.slug, (platform, []))[1].append(entry)
+
     results = {}
-    mappings = item.platform_mappings.select_related('platform').prefetch_related('aliases').all()
-    for m in mappings:
-        platform = m.platform
-        connected = RestaurantPlatform.objects.filter(
-            restaurant=restaurant, platform=platform, is_connected=True
-        ).exists()
-        if not connected:
-            continue
-        alias_names = list(m.aliases.values_list('name', flat=True))
-        in_app_name = m.platform_name or (alias_names[0] if alias_names else '')
-        if not in_app_name:
-            logger.warning(
-                '[fcm] item %s has no in-app name for %s; falling back to panel name "%s"',
-                item.id, platform.slug, item.name,
-            )
-        name = in_app_name or item.name
-        results[platform.slug] = send_menu_sync(
-            restaurant, platform.slug,
-            [{'name': name, 'available': item.is_available}],
-        )
+    for slug, (platform, entries) in by_platform.items():
+        sent = failures = 0
+        for chunk in _chunks(entries):
+            r = send_menu_sync(restaurant, slug, chunk)
+            sent += r['sent']
+            failures += r['failures']
+        results[slug] = {'sent': sent, 'failures': failures, 'items': len(entries)}
         # Also enqueue for host-side (ADB/Pi) runners that can't get FCM. They
-        # poll GET /api/pending-syncs/ and consume these.
+        # poll GET /api/pending-syncs/ and consume these (merged per platform).
         try:
-            from .models import PendingMenuSync
-            PendingMenuSync.objects.create(
-                restaurant=restaurant, platform=platform,
-                name=name, available=item.is_available,
-            )
+            PendingMenuSync.objects.bulk_create([
+                PendingMenuSync(restaurant=restaurant, platform=platform,
+                                name=e['name'], available=e['available'])
+                for e in entries
+            ])
         except Exception:
-            logger.exception('[fcm] failed to enqueue pending sync for %s', platform.slug)
+            logger.exception('[fcm] failed to enqueue pending sync for %s', slug)
     return results
+
+
+def push_item_availability(item):
+    """Push one menu item's current availability to every connected platform."""
+    from menu.models import MenuItem
+    return push_items_availability(
+        MenuItem.objects.filter(pk=item.pk)
+        .select_related('restaurant')
+        .prefetch_related('platform_mappings__platform', 'platform_mappings__aliases')
+    )

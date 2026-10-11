@@ -11,6 +11,7 @@
 import * as SecureStore from 'expo-secure-store';
 import type { Session } from '../lib/auth';
 import type { AutomationConfig } from './config.types';
+import { reportCaught, reportDeviceError } from '../lib/deviceLog';
 
 /** Secure-store key for the last good remote config document. */
 const CONFIG_KEY = 'prime.config';
@@ -44,20 +45,29 @@ export async function fetchRemoteConfig(
         Accept: 'application/json',
       },
     });
-  } catch {
+  } catch (e) {
+    reportCaught('تعذّر جلب إعدادات الأتمتة من الخادم', e);
     return null;
   }
 
-  if (!res.ok) return null;
+  if (!res.ok) {
+    reportDeviceError(`فشل جلب إعدادات الأتمتة · HTTP ${res.status}`);
+    return null;
+  }
 
   let data: unknown;
   try {
     data = await res.json();
-  } catch {
+  } catch (e) {
+    reportCaught('إعدادات الأتمتة ليست JSON صالحاً', e);
     return null;
   }
 
-  return isAutomationConfig(data) ? data : null;
+  if (!isAutomationConfig(data)) {
+    reportDeviceError('إعدادات الأتمتة من الخادم بصيغة غير متوقعة');
+    return null;
+  }
+  return data;
 }
 
 /** Read the last good remote config from secure storage, or null. */

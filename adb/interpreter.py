@@ -58,6 +58,11 @@ class StepFailure(Exception):
     """
 
 
+class FlowStopped(Exception):
+    """The run was abandoned on request (shutdown or a config change). Not a
+    failure: nothing is logged as an error and no recovery is attempted."""
+
+
 class FlowInterpreter:
     """Executes one automation flow over ADB.
 
@@ -69,10 +74,32 @@ class FlowInterpreter:
         indented ``print``.
     """
 
-    def __init__(self, device: AdbDevice, backend: dict, on_log=None) -> None:
+    def __init__(
+        self,
+        device: AdbDevice,
+        backend: dict,
+        on_log=None,
+        lock=None,
+        should_stop=None,
+        should_restart=None,
+    ) -> None:
         self.device = device
         self.backend = backend or {}
         self.on_log = on_log if on_log is not None else self._default_log
+        # The device's screen lock, shared by every interpreter driving this
+        # device (the order task and the menu task). A flow holds it while it
+        # is acting and gives it up while it only watches for a new order, so
+        # a menu on/off run never cuts into an order being handled and never
+        # has to wait for one to arrive either. Mirrors Kotlin ``ScreenLock``.
+        self._lock = lock
+        self._held = False
+        # Polled between steps; returning True abandons the run (shutdown).
+        self._should_stop = should_stop
+        # Polled ONLY while idly watching — never mid-order: returning True
+        # abandons the watch so the caller can start the flow over (the config
+        # changed, or a menu run used the screen and the app must be brought
+        # back to its orders screen).
+        self._should_restart = should_restart
 
         # Per-iteration state, reset at the start of each run.
         self._scope: Dict[str, Any] = {}
@@ -93,6 +120,23 @@ class FlowInterpreter:
             self.on_log(level, message, depth)
         except Exception:  # noqa: BLE001 - logging must never break a run
             pass
+
+    # ------------------------------------------------------------------ #
+    # Screen lock
+    # ------------------------------------------------------------------ #
+    def _acquire(self) -> None:
+        if self._lock is not None and not self._held:
+            self._lock.acquire()
+            self._held = True
+
+    def _release(self) -> None:
+        if self._held:
+            self._held = False
+            self._lock.release()
+
+    def _check_stop(self) -> None:
+        if self._should_stop is not None and self._should_stop():
+            raise FlowStopped()
 
     # ------------------------------------------------------------------ #
     # Public entry points
@@ -129,8 +173,27 @@ class FlowInterpreter:
         self._orders = []
 
         self._log("info", 'بدء تدفق "{}" · {} خطوة'.format(label, len(flow)), 0)
-        for step in flow:
-            self._run_step(step, 0)
+        # Take the screen for this run; watchFor gives it up while idle. Always
+        # released at the end so the other task on this device gets its turn.
+        self._acquire()
+        try:
+            for step in flow:
+                self._check_stop()
+                self._run_step(step, 0)
+        except FlowStopped:
+            raise
+        except Exception as exc:  # noqa: BLE001 - StepFailure or an adb error
+            # Logged while this run still owns the screen, so the error report
+            # captures the screen that actually failed — then back out of it so
+            # the next run (or the other task) starts from the main screen.
+            if isinstance(exc, StepFailure):
+                self._log("error", "فشل التدفق · {}".format(exc), 0)
+            else:
+                self._log("error", "خطأ غير متوقّع · {}".format(exc), 0)
+            self.recover_to_main()
+            raise
+        finally:
+            self._release()
         self._log("success", "اكتمل التدفق · {} طلب".format(len(self._orders)), 0)
         return {"ok": True, "orders": list(self._orders)}
 
@@ -158,15 +221,11 @@ class FlowInterpreter:
             try:
                 self.run_once(platform_config)
                 ok = True
-            except StepFailure as exc:
-                self._log("error", "فشل التدفق · {}".format(exc), 0)
-                self.recover_to_main()
-                ok = False
+            except FlowStopped:
+                return
             except KeyboardInterrupt:
                 raise
-            except Exception as exc:  # noqa: BLE001 - keep the loop alive
-                self._log("error", "خطأ غير متوقّع · {}".format(exc), 0)
-                self.recover_to_main()
+            except Exception:  # noqa: BLE001 - run_once already logged + recovered
                 ok = False
             time.sleep(scan_interval if ok else retry_delay)
 
@@ -179,12 +238,18 @@ class FlowInterpreter:
         ``recoverToMain``.
         """
         self._log("info", "تعذّر — محاولة العودة للشاشة الرئيسية", 0)
-        for _ in range(3):
-            try:
-                self.device.back()
-            except Exception:  # noqa: BLE001 - best effort
-                pass
-            time.sleep(0.5)
+        was_held = self._held
+        self._acquire()
+        try:
+            for _ in range(3):
+                try:
+                    self.device.back()
+                except Exception:  # noqa: BLE001 - best effort
+                    pass
+                time.sleep(0.5)
+        finally:
+            if not was_held:
+                self._release()
 
     # ------------------------------------------------------------------ #
     # Selector / interpolation / scope helpers
@@ -368,10 +433,21 @@ class FlowInterpreter:
         # log shows it's still alive (mirrors the Kotlin heartbeat).
         next_heartbeat = time.monotonic() + 5.0
         elapsed = 0
+        # Watching only reads the screen, so the screen is given up between
+        # looks: a menu on/off run can take its turn while no order is being
+        # handled. Each look is done holding the lock, and the lock is KEPT
+        # when the trigger is found — from here to the end of the run the
+        # order owns the screen and the menu run waits for it.
+        self._release()
         while True:
+            self._check_stop()
+            if self._should_restart is not None and self._should_restart():
+                raise FlowStopped()
+            self._acquire()
             if self._hierarchy().find(sel) is not None:
                 self._log("success", "ظهر · {}".format(key), depth)
                 return
+            self._release()
             now = time.monotonic()
             if now >= next_heartbeat:
                 elapsed += 5
@@ -591,3 +667,11 @@ class FlowInterpreter:
         if save_as:
             self._scope[save_as] = response
         self._log("info", "الردّ: {}".format(response), depth)
+        # HTTP 422 / 403 are the server's own verdict on the order (unmatched
+        # items, app not connected) and are already recorded there. Any other
+        # failure means the order did not get through — log it as an error.
+        error = response.get("error") if isinstance(response, dict) else None
+        if error and response.get("ok") is False and not str(error).startswith(
+            ("HTTP 422", "HTTP 403", "unknown endpoint")
+        ):
+            self._log("error", "لم يصل الطلب إلى الخادم · {}".format(error), depth)

@@ -108,6 +108,45 @@ def toggle_availability(request, pk):
 
 
 @api_view(['POST'])
+def bulk_availability(request):
+    """Turn several items on or off at once. The devices get ONE message per
+    app with the whole list (see push_items_availability), not one per item.
+
+    Body: { itemIds: [int, ...], available: bool }"""
+    restaurant = request.user.current_restaurant
+    if restaurant is None:
+        return Response({'detail': 'لا يوجد فرع نشط.'}, status=status.HTTP_400_BAD_REQUEST)
+    raw_ids = request.data.get('item_ids') or request.data.get('itemIds') or []
+    available = request.data.get('available')
+    try:
+        ids = [int(i) for i in raw_ids]
+    except (TypeError, ValueError):
+        return Response({'detail': 'قائمة الأصناف غير صحيحة.'}, status=status.HTTP_400_BAD_REQUEST)
+    if not ids or not isinstance(available, bool):
+        return Response({'detail': 'itemIds و available مطلوبان.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Only items that actually change are saved and pushed — re-sending an item
+    # already in that state would make the device open it for nothing.
+    changing = list(
+        MenuItem.objects.filter(restaurant=restaurant, id__in=ids)
+        .exclude(is_available=available).values_list('id', flat=True)
+    )
+    MenuItem.objects.filter(id__in=changing).update(is_available=available)
+    logger.info('[menu] %d item(s) availability → %s (bulk)', len(changing), available)
+
+    qs = (MenuItem.objects.filter(id__in=changing)
+          .select_related('restaurant', 'category')
+          .prefetch_related('platform_mappings__platform', 'platform_mappings__aliases'))
+    items = list(qs)
+    try:
+        from integrations.fcm import push_items_availability
+        push_items_availability(items)
+    except Exception:
+        logger.exception('[menu] bulk availability push failed')
+    return Response({'updated': len(items), 'items': MenuItemSerializer(items, many=True).data})
+
+
+@api_view(['POST'])
 def sync_item(request, pk):
     restaurant = request.user.current_restaurant
     try:

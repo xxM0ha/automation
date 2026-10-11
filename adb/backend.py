@@ -109,6 +109,24 @@ def login(base_url: str, email: str, password: str) -> str:
     return data["token"]
 
 
+def login_account(base_url: str, email: str, password: str) -> dict:
+    """Authenticate and return the whole login response.
+
+    Like :func:`login`, but keeps the account details the runner needs besides
+    the token — above all ``restaurant.slug``, the branch this account belongs
+    to, which is what routes this terminal's orders to the right branch.
+    """
+    url = base_url.rstrip("/") + "/api/auth/login/"
+    status, data = _request("POST", url, body={"email": email, "password": password})
+    if status == 0:
+        raise RuntimeError("cannot reach {}: {}".format(base_url, data))
+    if status != 200:
+        raise RuntimeError("login failed (HTTP {}): {}".format(status, data))
+    if not isinstance(data, dict) or not data.get("token"):
+        raise RuntimeError("login response missing token: {}".format(data))
+    return data
+
+
 def fetch_config(base_url: str, token: str) -> dict:
     """Fetch the AutomationConfig the mobile app loads.
 

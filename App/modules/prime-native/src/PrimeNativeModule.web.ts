@@ -85,6 +85,8 @@ class PrimeNativeModule extends NativeModule<PrimeNativeModuleEvents> {
   async stopAllEngines(): Promise<void> { unsupported('stopAllEngines'); }
   async pauseEngine(_platform: string): Promise<void> { unsupported('pauseEngine'); }
   async resumeEngine(_platform: string): Promise<void> { unsupported('resumeEngine'); }
+  async configureDeviceLog(_baseUrl: string | null, _token: string | null): Promise<void> {}
+  async reportDeviceError(_platform: string, _kind: string, _message: string): Promise<void> {}
   async startEngineService(_label: string): Promise<void> { unsupported('startEngineService'); }
   async stopEngineService(): Promise<void> { unsupported('stopEngineService'); }
 }

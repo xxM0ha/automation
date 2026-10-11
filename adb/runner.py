@@ -1,49 +1,65 @@
 """Orchestrator for the host-side ADB automation runner.
 
 This is the ADB-port equivalent of the mobile app's ``EngineController`` plus
-its FCM-driven menu-sync queue. Given device credentials and the package this
-terminal runs, it:
+its FCM-driven menu-sync queue, for the terminals the app cannot be installed
+on. One PC drives every Android device plugged into it over USB:
 
-  1. logs in and fetches the same server-driven AutomationConfig the app uses;
-  2. binds to the connected Android device over ADB;
-  3. starts the continuous order-watching tasks for this terminal's app; and
-  4. polls the backend for queued menu-sync jobs and runs them one-shot.
+  1. it logs in with the branch account and fetches the same server-driven
+     AutomationConfig the app uses (re-fetched every few seconds, so a config
+     edited in the dashboard takes effect without touching this PC);
+  2. it watches ``adb devices`` — each device that appears gets its own worker,
+     and one that is unplugged is dropped, with no restart;
+  3. for each device it works out which delivery app it runs by checking which
+     of the config's ``targetPackage``s is installed on it, then runs that
+     app's order task and its ``<platform>_menu`` task;
+  4. it polls the backend for queued menu on/off jobs and hands each to the
+     device that runs that app.
 
-Everything is driven by the server config, so panel changes propagate without
-code changes — that's why the config is re-fetched periodically.
-
-ADB CONCURRENCY NOTE
+ONE SCREEN, ONE FLOW
 ====================
-A single device is effectively serial: two threads issuing ``adb shell`` at the
-same time would interleave taps/dumps on one screen and corrupt each other.
-We therefore do NOT run multiple continuous tasks in parallel threads. Instead:
-
-  * exactly one continuous task  -> its own worker thread running ``run_loop``;
-  * more than one continuous task -> a single worker thread that round-robins
-    one ``run_once`` per platform, so only one flow ever touches the device at
-    a time.
-
-The menu poller also touches the device, so it shares one lock with the order
-worker — only one flow runs against the device at any instant.
+Two flows must never tap the same screen at once. Each device has one lock,
+shared by its order task and its menu task (see ``FlowInterpreter``): a flow
+holds it while acting and gives it up while it only watches for a new order.
+So a menu on/off run waits for an order that is being handled, and an order
+that arrives during a menu run is handled right after it.
 """
 
 from __future__ import annotations
 
 import argparse
+import getpass
+import json
+import os
+import queue
+import sys
 import threading
 import time
 from datetime import datetime
-from typing import Callable, Dict, List, Optional
+from typing import Dict, List, Optional
 
-from .backend import fetch_config, login, poll_pending
-from .device import AdbDevice
-from .interpreter import FlowInterpreter, StepFailure
+from .backend import fetch_config, login_account, poll_pending
+from .device import AdbDevice, list_devices
+from .devicelog import DeviceLog
+from .interpreter import FlowInterpreter, FlowStopped, StepFailure
+from .uihierarchy import Hierarchy
 
-# How often (seconds) to re-fetch the config so panel changes propagate.
-_CONFIG_REFRESH_INTERVAL = 300
+DEFAULT_BASE_URL = "https://api.3alijny.com"
+
+# Login + per-device choices, saved after the first run so the launcher can be
+# started with no arguments from then on.
+SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".ordo-adb", "settings.json")
+
+# How often (seconds) to re-fetch the config so dashboard edits propagate.
+_CONFIG_REFRESH_INTERVAL = 20
+# How often (seconds) to look for plugged / unplugged devices.
+_DEVICE_SCAN_INTERVAL = 3
+# Pause after a failed run before trying again.
+_RETRY_DELAY = 2.0
 
 # Suffix that marks a platform as a push/poll-driven menu-sync task.
 _MENU_SUFFIX = "_menu"
+
+_print_lock = threading.Lock()
 
 
 def _now() -> str:
@@ -51,377 +67,716 @@ def _now() -> str:
     return datetime.now().strftime("%H:%M:%S")
 
 
-class Runner:
-    """Drives one ADB-connected terminal from the server config.
+def _say(tag: str, message: str) -> None:
+    with _print_lock:
+        try:
+            print("[{}] [{}] {}".format(_now(), tag, message), flush=True)
+        except UnicodeEncodeError:
+            # A Windows console that cannot show Arabic must not kill the run.
+            safe = message.encode("ascii", "backslashreplace").decode("ascii")
+            print("[{}] [{}] {}".format(_now(), tag, safe), flush=True)
 
-    :param serial: adb serial (``adb -s <serial>``); ``None`` for the only device.
-    :param base_url: backend base URL, e.g. ``https://api.3alijny.com``.
-    :param email: backend account email.
-    :param password: backend account password.
-    :param app: the ``targetPackage`` this terminal runs, e.g.
-        ``com.fastwares.lezzoo.eats.merchant``. Only platforms whose
-        ``targetPackage`` equals this are handled here.
-    :param poll_interval: seconds between menu-sync poll attempts.
+
+# ---------------------------------------------------------------------- #
+# Settings
+# ---------------------------------------------------------------------- #
+def load_settings() -> dict:
+    try:
+        with open(SETTINGS_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+            return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_settings(settings: dict) -> None:
+    os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)
+    with open(SETTINGS_PATH, "w", encoding="utf-8") as fh:
+        json.dump(settings, fh, ensure_ascii=False, indent=2)
+
+
+def _is_menu(platform: dict) -> bool:
+    return (platform.get("platform") or "").endswith(_MENU_SUFFIX)
+
+
+def _selector_package(platform: dict) -> str:
+    """The app a task drives: ``targetPackage``, else its ``package`` selector."""
+    pkg = platform.get("targetPackage")
+    if pkg:
+        return pkg
+    for sel in (platform.get("selectors") or {}).values():
+        if isinstance(sel, dict) and sel.get("strategy") == "package" and sel.get("value"):
+            return sel["value"]
+    return ""
+
+
+# ---------------------------------------------------------------------- #
+# One device
+# ---------------------------------------------------------------------- #
+class DeviceWorker:
+    """Runs the order task and the menu task of one plugged-in device."""
+
+    def __init__(self, runner: "Runner", serial: str) -> None:
+        self.runner = runner
+        self.serial = serial
+        self.tag = serial[-6:] if len(serial) > 6 else serial
+        self.device = AdbDevice(serial=serial)
+        self.device_log = DeviceLog(runner.base_url, lambda: runner.token, self.device)
+
+        self.stop_event = threading.Event()
+        # Set when the config changed or a menu run used the screen, so an
+        # order task parked in a watch starts its flow over (new config / back
+        # to the orders screen). Only honoured while watching, never mid-order.
+        self._restart_orders = threading.Event()
+        self.screen_lock = threading.Lock()
+        self.menu_jobs: "queue.Queue[dict]" = queue.Queue()
+
+        #: The delivery app this device runs (a ``targetPackage``), once known.
+        self.app: Optional[str] = None
+        self._installed: Optional[set] = None
+        self._no_app_warned = False
+        self._ran_once: set = set()
+
+        self.order_interp = FlowInterpreter(
+            self.device, runner.backend_block(), lock=self.screen_lock,
+            should_stop=self.stop_event.is_set,
+            should_restart=self._restart_orders.is_set,
+        )
+        self.menu_interp = FlowInterpreter(
+            self.device, runner.backend_block(), lock=self.screen_lock,
+            should_stop=self.stop_event.is_set,
+        )
+        self.order_interp.on_log = lambda lv, msg, d=0: self._on_log(self.order_interp, lv, msg, d)
+        self.menu_interp.on_log = lambda lv, msg, d=0: self._on_log(self.menu_interp, lv, msg, d)
+
+        self._threads = [
+            threading.Thread(target=self._order_loop, name="order-" + self.tag, daemon=True),
+            threading.Thread(target=self._menu_loop, name="menu-" + self.tag, daemon=True),
+        ]
+
+    # -- logging ------------------------------------------------------------
+    def _on_log(self, interp: FlowInterpreter, level: str, message: str, depth: int = 0) -> None:
+        """Print one engine line and feed the device error log.
+
+        An ``error`` line is uploaded to the dashboard with the lines before it
+        and a dump of the screen as it is right now.
+        """
+        _say("{} {}".format(self.tag, level), "  " * max(0, int(depth)) + str(message))
+        self.device_log.trail(level, message, depth)
+        if level == "error":
+            self.device_log.report(getattr(interp, "_platform", "") or "", message)
+
+    def say(self, message: str) -> None:
+        _say(self.tag, message)
+
+    def problem(self, message: str) -> None:
+        """A device-level failure outside a flow: print it and report it."""
+        self.say(message)
+        self.device_log.report("", message, kind="app", capture_screen=False)
+
+    # -- lifecycle ----------------------------------------------------------
+    def start(self) -> None:
+        self.say("device connected")
+        # Send anything left queued from a previous run that ended offline.
+        threading.Thread(target=self.device_log.flush, name="device-log-flush", daemon=True).start()
+        for t in self._threads:
+            t.start()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+
+    def config_changed(self) -> None:
+        """Called by the runner after a config refresh that changed something."""
+        backend = self.runner.backend_block()
+        self.order_interp.backend = backend
+        self.menu_interp.backend = backend
+        self._ran_once.clear()
+        self._no_app_warned = False
+        self._restart_orders.set()
+
+    # -- which app does this device run? ---------------------------------------
+    def _resolve_app(self) -> Optional[str]:
+        """Pick this device's app: the one forced on the command line or in the
+        settings file, else the first config app that is installed on it."""
+        forced = self.runner.forced_app(self.serial)
+        if forced:
+            return forced
+        if self._installed is None:
+            self._installed = self.device.installed_packages()
+        candidates: List[str] = []
+        for p in self.runner.platforms():
+            pkg = _selector_package(p)
+            if pkg and pkg in self._installed and pkg not in candidates:
+                candidates.append(pkg)
+        if not candidates:
+            if not self._no_app_warned:
+                self._no_app_warned = True
+                self.say(
+                    "none of the apps in the server config is installed on this device "
+                    "— waiting (add its task in the dashboard, or install the app)"
+                )
+            # The app may be installed later; look again next time.
+            self._installed = None
+            return None
+        if len(candidates) > 1 and not self._no_app_warned:
+            self._no_app_warned = True
+            self.say(
+                "several configured apps are installed: {}. Using {} — a device shows one "
+                "app at a time. To choose another: python -m adb setup".format(
+                    ", ".join(candidates), candidates[0]
+                )
+            )
+        return candidates[0]
+
+    def menu_slugs(self) -> List[str]:
+        """Bare platform slugs this device has a ``_menu`` task for."""
+        if not self.app:
+            return []
+        return [
+            p["platform"][: -len(_MENU_SUFFIX)]
+            for p in self.runner.platforms()
+            if _is_menu(p) and _selector_package(p) == self.app
+        ]
+
+    def _order_tasks(self) -> List[dict]:
+        return [
+            p for p in self.runner.platforms()
+            if not _is_menu(p) and p.get("control") == "running"
+            and _selector_package(p) == self.app
+        ]
+
+    def _menu_task(self, platform: str) -> Optional[dict]:
+        wanted = platform + _MENU_SUFFIX
+        for p in self.runner.platforms():
+            if p.get("platform") == wanted and _selector_package(p) == self.app:
+                return p
+        return None
+
+    def _wait(self, seconds: float) -> None:
+        """Sleep, waking early on shutdown or a config change."""
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if self.stop_event.is_set() or self._restart_orders.is_set():
+                return
+            time.sleep(0.2)
+
+    # -- order task ---------------------------------------------------------
+    def _order_loop(self) -> None:
+        announced: Optional[str] = None
+        while not self.stop_event.is_set():
+            self._restart_orders.clear()
+            try:
+                self.app = self._resolve_app()
+            except Exception as exc:  # noqa: BLE001 - e.g. adb lost the device
+                self.problem("cannot read the device's installed apps: {}".format(exc))
+                self._wait(5)
+                continue
+            if not self.app:
+                self._wait(10)
+                continue
+
+            tasks = [t for t in self._order_tasks() if t.get("platform") not in self._ran_once]
+            names = ", ".join(t.get("platform", "?") for t in tasks) or "(none running)"
+            state = "{} | {}".format(self.app, names)
+            if state != announced:
+                announced = state
+                self.say("app {} — order tasks: {} — menu tasks: {}".format(
+                    self.app, names, ", ".join(self.menu_slugs()) or "(none)"))
+            if not tasks:
+                # Nothing set to "running" for this app yet; the menu task (if
+                # any) still works. Check again when the config changes.
+                self._wait(10)
+                continue
+
+            for task in tasks:
+                if self.stop_event.is_set() or self._restart_orders.is_set():
+                    break
+                ok = self._run_order(task)
+                if (task.get("runMode") or "once") != "continuous":
+                    self._ran_once.add(task.get("platform"))
+                    continue
+                params = task.get("parameters") or {}
+                try:
+                    interval = float(params.get("scanIntervalSec", 5) or 5)
+                except (TypeError, ValueError):
+                    interval = 5.0
+                self._wait(interval if ok else _RETRY_DELAY)
+
+    def _run_order(self, task: dict) -> bool:
+        """One run of an order task. Returns False if it failed."""
+        try:
+            self.order_interp.run_once(task)
+            return True
+        except FlowStopped:
+            return True
+        except Exception:  # noqa: BLE001 - run_once logged it and backed out
+            return False
+
+    # -- menu task ----------------------------------------------------------
+    def _menu_loop(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                job = self.menu_jobs.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            platform = job.get("platform") or ""
+            items = job.get("items") or []
+            task = self._menu_task(platform)
+            if task is None or not items:
+                continue
+            self.say("menu on/off for '{}' — {} item(s) in one run".format(platform, len(items)))
+            try:
+                # Blocks here while an order is being handled on this device.
+                self.menu_interp.run_once(task, vars={"pushItems": items})
+            except FlowStopped:
+                return
+            except Exception:  # noqa: BLE001
+                # run_once logged the error (→ dashboard) and backed out of
+                # whatever sheet was open.
+                pass
+            # The menu run left the app on some other screen: have the order
+            # task start its flow over so it returns to the orders screen
+            # instead of watching a menu page.
+            self._restart_orders.set()
+
+
+# ---------------------------------------------------------------------- #
+# The PC
+# ---------------------------------------------------------------------- #
+class Runner:
+    """Drives every ADB-connected device from the server config.
+
+    :param base_url: backend base URL.
+    :param email: branch account email (or branch username).
+    :param password: its password.
+    :param serial: only drive this device; ``None`` drives every device.
+    :param app: force this ``targetPackage`` on every device instead of
+        auto-detecting it.
+    :param apps: per-device override, ``{serial: targetPackage}``.
+    :param poll_interval: seconds between menu on/off polls.
     """
 
     def __init__(
         self,
-        serial: Optional[str],
         base_url: str,
         email: str,
         password: str,
-        app: str,
+        serial: Optional[str] = None,
+        app: Optional[str] = None,
+        apps: Optional[Dict[str, str]] = None,
         poll_interval: float = 5.0,
     ) -> None:
-        self.serial = serial
         self.base_url = base_url.rstrip("/")
         self.email = email
         self.password = password
+        self.serial = serial
         self.app = app
+        self.apps = apps or {}
         self.poll_interval = poll_interval
 
         self.token: Optional[str] = None
+        self.restaurant: str = ""
         self.config: Dict = {}
-        self.device: Optional[AdbDevice] = None
-        self.interp: Optional[FlowInterpreter] = None
-
-        # Signals all loops to wind down (Ctrl-C / shutdown).
+        self._config_fingerprint = ""
+        self.workers: Dict[str, DeviceWorker] = {}
+        self._warned: set = set()
         self._stop = threading.Event()
-        # One device == one flow at a time; the order worker and menu poller
-        # both acquire this before touching the device.
-        self._device_lock = threading.Lock()
-        self._threads: List[threading.Thread] = []
-        # When the config was last fetched (monotonic), for periodic refresh.
-        self._last_config_fetch = 0.0
 
-    # ------------------------------------------------------------------ #
-    # Logging
-    # ------------------------------------------------------------------ #
-    def on_log(self, level: str, message: str, depth: int = 0) -> None:
-        """Print a timestamped, depth-indented engine log line.
+    # -- account + config -----------------------------------------------------
+    def login(self) -> None:
+        account = login_account(self.base_url, self.email, self.password)
+        self.token = account["token"]
+        self.restaurant = ((account.get("restaurant") or {}).get("slug")) or ""
 
-        Matches the app's ``[engine:<platform>] ...`` console style. ``depth``
-        nests sub-steps under their parent. The interpreter calls this for every
-        step it runs.
+    def backend_block(self) -> dict:
+        """The config's backend block, pointed at THIS account.
+
+        The config's ``restaurant`` is one global value shared by every branch,
+        so it is replaced with the logged-in account's own branch — that is
+        what routes this PC's orders to its branch — and ``baseUrl`` with the
+        server we logged in to. Mirrors what the app does on start.
         """
-        indent = "  " * max(0, int(depth))
-        print("[{}] [{}] {}{}".format(_now(), level, indent, message), flush=True)
+        block = dict(self.config.get("backend") or {})
+        block["baseUrl"] = self.base_url
+        if self.restaurant:
+            block["restaurant"] = self.restaurant
+        return block
 
-    def _engine_log(self, message: str) -> None:
-        """Top-level runner log (depth 0, no level noise)."""
-        print("[{}] [engine] {}".format(_now(), message), flush=True)
+    def platforms(self) -> List[dict]:
+        return [p for p in (self.config.get("platforms") or []) if isinstance(p, dict)]
 
-    # ------------------------------------------------------------------ #
-    # Startup
-    # ------------------------------------------------------------------ #
-    def start(self) -> None:
-        """Log in, fetch config, build the device + interpreter."""
-        self._engine_log(
-            "logging in to {} as {} ...".format(self.base_url, self.email)
-        )
-        self.token = login(self.base_url, self.email, self.password)
-        self._engine_log("login ok; fetching config ...")
-        self._refresh_config(force=True)
+    def forced_app(self, serial: str) -> Optional[str]:
+        return self.app or self.apps.get(serial) or None
 
-        self.device = AdbDevice(serial=self.serial)
-        # The shared backend block (baseUrl/restaurant) lets the interpreter
-        # resolve request steps (e.g. the order webhook), mirroring how the app
-        # merges config.backend into each task.
-        backend_block = self.config.get("backend", {})
-        self.interp = FlowInterpreter(self.device, backend_block, self.on_log)
-        self._engine_log(
-            "device bound (serial={}); driving app {}".format(
-                self.serial or "<default>", self.app
-            )
-        )
-
-    def _refresh_config(self, force: bool = False) -> None:
-        """(Re)fetch the config if it's stale, so panel changes propagate."""
-        now = time.monotonic()
-        if not force and (now - self._last_config_fetch) < _CONFIG_REFRESH_INTERVAL:
-            return
+    def refresh_config(self) -> bool:
+        """Fetch the config; returns True if it differs from the one we had."""
         assert self.token is not None
-        self.config = fetch_config(self.base_url, self.token)
-        self._last_config_fetch = now
-        # Keep the interpreter's backend block in sync after a refresh.
-        if self.interp is not None:
-            self.interp.backend = self.config.get("backend", {})
-
-    # ------------------------------------------------------------------ #
-    # Platform selection
-    # ------------------------------------------------------------------ #
-    def _my_platforms(self) -> List[dict]:
-        """All config platforms whose ``targetPackage`` is this terminal's app."""
-        return [
-            p
-            for p in self.config.get("platforms", [])
-            if p.get("targetPackage") == self.app
-        ]
-
-    def _order_tasks(self) -> List[dict]:
-        """Continuous order tasks for this app (not ``_menu``, control running)."""
-        tasks = []
-        for p in self._my_platforms():
-            name = p.get("platform", "")
-            if name.endswith(_MENU_SUFFIX):
-                continue
-            if p.get("control") == "running":
-                tasks.append(p)
-        return tasks
-
-    def _menu_platform_slugs(self) -> List[str]:
-        """Bare platform slugs this terminal has a ``_menu`` flow for (e.g.
-        ``["lezzo"]`` for a ``*_menu`` task named ``"lezzo_menu"``). Passed to the
-        backend so this terminal only consumes its own pending-sync jobs."""
-        slugs = []
-        for p in self._my_platforms():
-            name = p.get("platform", "")
-            if name.endswith(_MENU_SUFFIX):
-                slugs.append(name[: -len(_MENU_SUFFIX)])
-        return slugs
-
-    def _menu_task_for(self, platform: str) -> Optional[dict]:
-        """Find the ``<platform>_menu`` task for this app, or ``None``.
-
-        A pending-sync job names a bare platform (e.g. ``"lezzo"``); the menu
-        flow that fulfils it is configured as ``"lezzo_menu"``.
-        """
-        wanted = platform + _MENU_SUFFIX
-        for p in self._my_platforms():
-            if p.get("platform") == wanted:
-                return p
-        return None
-
-    # ------------------------------------------------------------------ #
-    # Continuous order tasks
-    # ------------------------------------------------------------------ #
-    def _start_order_worker(self) -> None:
-        """Spin up the single worker thread for this terminal's order tasks."""
-        tasks = self._order_tasks()
-        if not tasks:
-            self._engine_log("no continuous order tasks for this app")
-            return
-
-        if len(tasks) == 1:
-            # Simple case: one continuous task gets its own run_loop thread.
-            task = tasks[0]
-            self._engine_log(
-                "starting continuous task '{}' (run_loop)".format(
-                    task.get("platform")
-                )
-            )
-            t = threading.Thread(
-                target=self._run_single_loop,
-                args=(task,),
-                name="order-{}".format(task.get("platform")),
-                daemon=True,
-            )
-        else:
-            # Multiple continuous tasks share one device, so we cannot run them
-            # in parallel without corrupting the screen. Round-robin one
-            # run_once per task in a single thread instead.
-            names = ", ".join(t.get("platform", "?") for t in tasks)
-            self._engine_log(
-                "starting {} continuous tasks round-robin ({})".format(
-                    len(tasks), names
-                )
-            )
-            t = threading.Thread(
-                target=self._run_round_robin,
-                args=(tasks,),
-                name="order-roundrobin",
-                daemon=True,
-            )
-        t.start()
-        self._threads.append(t)
-
-    def _run_single_loop(self, task: dict) -> None:
-        """Run one continuous task's ``run_loop`` under the device lock."""
-        assert self.interp is not None
-        platform = task.get("platform", "?")
-        # Hold the device for the lifetime of the loop: with a single continuous
-        # task there's nothing else competing except the menu poller, which will
-        # simply wait its turn. run_loop is expected to block until stopped.
-        with self._device_lock:
-            try:
-                self.interp.run_loop(task)
-            except StepFailure as exc:
-                self.on_log("error", "task '{}' failed: {}".format(platform, exc))
-            except Exception as exc:  # noqa: BLE001 - keep the runner alive
-                self.on_log(
-                    "error", "task '{}' crashed: {}".format(platform, exc)
-                )
-
-    def _run_round_robin(self, tasks: List[dict]) -> None:
-        """Round-robin ``run_once`` across multiple continuous tasks.
-
-        Each iteration runs exactly one flow against the device while holding
-        the lock, then yields so the menu poller (or the next task) can take a
-        turn. Repeats until shutdown.
-        """
-        assert self.interp is not None
-        while not self._stop.is_set():
-            for task in tasks:
-                if self._stop.is_set():
-                    return
-                platform = task.get("platform", "?")
-                with self._device_lock:
-                    try:
-                        self.interp.run_once(task, vars={})
-                    except StepFailure as exc:
-                        self.on_log(
-                            "error",
-                            "task '{}' iteration failed: {}".format(platform, exc),
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        self.on_log(
-                            "error",
-                            "task '{}' iteration crashed: {}".format(platform, exc),
-                        )
-                # Brief yield between tasks so we don't pin the CPU / device.
-                self._stop.wait(0.5)
-
-    # ------------------------------------------------------------------ #
-    # Menu-sync poll loop
-    # ------------------------------------------------------------------ #
-    def _run_menu_poller(self) -> None:
-        """Poll for menu-sync jobs and run the matching ``_menu`` flow once.
-
-        Mirrors the app's FCM handler, which injects the pushed items as the
-        ``pushItems`` flow variable. Each job is ``{"platform", "items"}``; we
-        map ``platform`` to its ``<platform>_menu`` task and run it one-shot.
-
-        TODO(backend): this depends on a ``GET /api/pending-syncs/`` endpoint
-        (or equivalent) that does not exist yet. Until it ships, ``poll_pending``
-        returns ``[]`` and this loop is a harmless no-op. When the endpoint
-        lands it should return a list of
-        ``{"platform": "lezzo", "items": [...]}`` jobs for this restaurant.
-        """
-        assert self.interp is not None and self.token is not None
-        while not self._stop.is_set():
-            # Periodic config refresh keeps menu-task definitions current.
-            try:
-                self._refresh_config()
-            except Exception as exc:  # noqa: BLE001
-                self._engine_log("config refresh failed: {}".format(exc))
-
-            try:
-                jobs = poll_pending(self.base_url, self.token, platforms=self._menu_platform_slugs())
-            except Exception as exc:  # noqa: BLE001 - never let polling kill the loop
-                self._engine_log("poll_pending failed: {}".format(exc))
-                jobs = []
-
-            for job in jobs:
-                if self._stop.is_set():
-                    break
-                platform = job.get("platform")
-                items = job.get("items", [])
-                if not platform:
-                    continue
-                task = self._menu_task_for(platform)
-                if task is None:
-                    # No menu flow for this platform on this terminal — skip.
-                    continue
-                self._engine_log(
-                    "menu-sync job for '{}' ({} items)".format(platform, len(items))
-                )
-                # Serialize against the order worker — one flow per device.
-                with self._device_lock:
-                    try:
-                        self.interp.run_once(task, vars={"pushItems": items})
-                    except StepFailure as exc:
-                        self.on_log(
-                            "error",
-                            "menu sync '{}' failed: {}".format(platform, exc),
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        self.on_log(
-                            "error",
-                            "menu sync '{}' crashed: {}".format(platform, exc),
-                        )
-
-            # Sleep until the next poll, but wake immediately on shutdown.
-            self._stop.wait(self.poll_interval)
-
-    # ------------------------------------------------------------------ #
-    # Lifecycle
-    # ------------------------------------------------------------------ #
-    def run(self) -> None:
-        """Start workers and block until Ctrl-C, then shut down cleanly."""
-        self.start()
-        self._start_order_worker()
-
-        poller = threading.Thread(
-            target=self._run_menu_poller, name="menu-poller", daemon=True
-        )
-        poller.start()
-        self._threads.append(poller)
-
-        self._engine_log("runner up; press Ctrl-C to stop")
         try:
-            # Idle the main thread; daemon workers do the work.
+            config = fetch_config(self.base_url, self.token)
+        except RuntimeError as exc:
+            if "HTTP 401" not in str(exc):
+                raise
+            # The token was revoked (password changed / logged out elsewhere).
+            self.login()
+            config = fetch_config(self.base_url, self.token)
+        fingerprint = json.dumps(config, sort_keys=True, ensure_ascii=False)
+        changed = fingerprint != self._config_fingerprint
+        self.config = config
+        self._config_fingerprint = fingerprint
+        return changed
+
+    # -- devices ------------------------------------------------------------
+    def _warn_once(self, key: str, message: str) -> None:
+        if key not in self._warned:
+            self._warned.add(key)
+            _say("engine", message)
+
+    def scan_devices(self) -> None:
+        """Start a worker for each new usable device; drop unplugged ones."""
+        try:
+            seen = list_devices()
+        except RuntimeError as exc:
+            self._warn_once("adb", "{} — is adb installed? See adb/README.md".format(exc))
+            return
+        self._warned.discard("adb")
+
+        usable = set()
+        for serial, state in seen:
+            if self.serial and serial != self.serial:
+                continue
+            if state == "device":
+                usable.add(serial)
+                self._warned.discard("state:" + serial)
+            elif state == "unauthorized":
+                self._warn_once(
+                    "state:" + serial,
+                    "device {} is waiting: unlock it and tap Allow on the "
+                    "'Allow USB debugging?' dialog (tick 'Always allow')".format(serial),
+                )
+            else:
+                self._warn_once("state:" + serial, "device {} is {}".format(serial, state))
+
+        for serial in usable - set(self.workers):
+            worker = DeviceWorker(self, serial)
+            self.workers[serial] = worker
+            worker.start()
+        for serial in set(self.workers) - usable:
+            self.workers.pop(serial).stop()
+            _say("engine", "device {} disconnected".format(serial))
+        if not self.workers:
+            self._warn_once("none", "no device connected — plug one in with USB debugging on")
+        else:
+            self._warned.discard("none")
+
+    def _problem(self, message: str) -> None:
+        """A PC-level failure: print it, and report it through any device."""
+        _say("engine", message)
+        for worker in self.workers.values():
+            worker.device_log.report("", message, kind="app", capture_screen=False)
+            break
+
+    def _poll_menu_jobs(self) -> None:
+        """Fetch queued menu on/off jobs and hand each to the device(s) that
+        run that app. Only platforms a connected device can serve are asked
+        for, because fetching a job consumes it."""
+        by_slug: Dict[str, List[DeviceWorker]] = {}
+        for worker in self.workers.values():
+            for slug in worker.menu_slugs():
+                by_slug.setdefault(slug, []).append(worker)
+        if not by_slug or self.token is None:
+            return
+        for job in poll_pending(self.base_url, self.token, platforms=sorted(by_slug)):
+            for worker in by_slug.get(job.get("platform") or "", []):
+                worker.menu_jobs.put(job)
+
+    # -- lifecycle ----------------------------------------------------------
+    def run(self) -> None:
+        """Log in, then supervise devices until Ctrl-C."""
+        _say("engine", "logging in to {} as {} ...".format(self.base_url, self.email))
+        self.login()
+        self.refresh_config()
+        _say("engine", "logged in — branch '{}' — {} task(s) in the server config".format(
+            self.restaurant or "?", len(self.platforms())))
+        _say("engine", "running; press Ctrl-C to stop")
+
+        next_scan = next_config = next_poll = 0.0
+        try:
             while not self._stop.is_set():
-                self._stop.wait(1.0)
+                now = time.monotonic()
+                if now >= next_scan:
+                    next_scan = now + _DEVICE_SCAN_INTERVAL
+                    self.scan_devices()
+                if now >= next_config:
+                    next_config = now + _CONFIG_REFRESH_INTERVAL
+                    try:
+                        if self.refresh_config():
+                            _say("engine", "server config changed — applying")
+                            for worker in self.workers.values():
+                                worker.config_changed()
+                    except Exception as exc:  # noqa: BLE001 - keep running on the last config
+                        self._problem("config refresh failed: {}".format(exc))
+                if now >= next_poll:
+                    next_poll = now + self.poll_interval
+                    try:
+                        self._poll_menu_jobs()
+                    except Exception as exc:  # noqa: BLE001 - never let polling kill the loop
+                        self._problem("menu poll failed: {}".format(exc))
+                self._stop.wait(0.5)
         except KeyboardInterrupt:
-            self._engine_log("Ctrl-C received; shutting down ...")
+            _say("engine", "Ctrl-C received; shutting down ...")
         finally:
             self.stop()
 
     def stop(self) -> None:
-        """Signal all loops to stop and wait briefly for them to wind down."""
         self._stop.set()
-        for t in self._threads:
-            if t.is_alive():
-                t.join(timeout=5.0)
-        self._engine_log("stopped")
+        for worker in self.workers.values():
+            worker.stop()
+        _say("engine", "stopped")
+
+
+# ---------------------------------------------------------------------- #
+# Helper commands (for writing and checking a new app's config)
+# ---------------------------------------------------------------------- #
+def _pick_device(serial: Optional[str]) -> AdbDevice:
+    usable = [s for s, state in list_devices() if state == "device"]
+    if serial:
+        if serial not in usable:
+            raise SystemExit("device {} is not connected (see: python -m adb devices)".format(serial))
+        return AdbDevice(serial=serial)
+    if not usable:
+        raise SystemExit("no device connected (see: python -m adb devices)")
+    if len(usable) > 1:
+        raise SystemExit("several devices connected — pass --serial one of: {}".format(", ".join(usable)))
+    return AdbDevice(serial=usable[0])
+
+
+def cmd_devices(runner: Optional[Runner]) -> int:
+    """List connected devices and, when logged in, the config apps on each."""
+    devices = list_devices()
+    if not devices:
+        print("no device connected")
+        return 1
+    packages = []
+    if runner is not None:
+        for p in runner.platforms():
+            pkg = _selector_package(p)
+            if pkg and pkg not in packages:
+                packages.append(pkg)
+    for serial, state in devices:
+        line = "{}  {}".format(serial, state)
+        if state == "device":
+            dev = AdbDevice(serial=serial)
+            try:
+                line += "  {}".format(dev.shell("getprop", "ro.product.model"))
+                if packages:
+                    installed = dev.installed_packages()
+                    found = [p for p in packages if p in installed]
+                    line += "  apps in config: {}".format(", ".join(found) or "(none installed)")
+            except Exception as exc:  # noqa: BLE001
+                line += "  (cannot query: {})".format(exc)
+        print(line)
+    return 0
+
+
+def cmd_dump(serial: Optional[str], out: Optional[str]) -> int:
+    """Print what is on the device's screen right now: the foreground package
+    and every node's text / content-desc / view id — exactly the values a
+    config selector can match. Open the screen you want on the device first."""
+    device = _pick_device(serial)
+    nodes = Hierarchy.parse(device.dump_hierarchy())
+    package = device.current_package() or ""
+    lines = ["package: {}".format(package)]
+    count = 0
+    for el in nodes._elements:  # noqa: SLF001 - diagnostic dump of every node
+        n = nodes._node_of[el]
+        if not (n.text.strip() or n.content_desc.strip() or n.resource_id):
+            continue
+        count += 1
+        parts = []
+        if n.text.strip():
+            parts.append('text="{}"'.format(n.text.strip()))
+        if n.content_desc.strip():
+            parts.append('contentDesc="{}"'.format(n.content_desc.strip()))
+        if n.resource_id:
+            parts.append('viewId="{}"'.format(n.resource_id.split("/")[-1]))
+        if n.clickable:
+            parts.append("clickable")
+        if n.package and n.package != package:
+            parts.append("package={}".format(n.package))
+        parts.append("bounds={}".format(list(n.bounds)))
+        lines.append("  ".join(parts))
+    lines.append("({} nodes)".format(count))
+    text = "\n".join(lines)
+    if out:
+        with open(out, "w", encoding="utf-8") as fh:
+            fh.write(text + "\n")
+        print("screen written to {}".format(out))
+    else:
+        _say("dump", "\n" + text)
+    return 0
+
+
+def cmd_test(runner: Runner, platform: str, serial: Optional[str], items_json: Optional[str]) -> int:
+    """Run ONE task's flow once on a device and show every step — for checking
+    a config while writing it. A menu task gets ``--items`` as its pushItems."""
+    task = next((p for p in runner.platforms() if p.get("platform") == platform), None)
+    if task is None:
+        names = ", ".join(p.get("platform", "?") for p in runner.platforms())
+        raise SystemExit("no task '{}' in the server config. Tasks: {}".format(platform, names))
+    device = _pick_device(serial)
+    vars_: dict = {}
+    if items_json:
+        try:
+            vars_["pushItems"] = json.loads(items_json)
+        except ValueError as exc:
+            raise SystemExit("--items is not valid JSON: {}".format(exc))
+    interp = FlowInterpreter(
+        device, runner.backend_block(),
+        on_log=lambda lv, msg, d=0: _say(lv, "  " * max(0, int(d)) + str(msg)),
+    )
+    print("NOTE: this really runs the flow — an order it reads is sent to the server.")
+    try:
+        interp.run_once(task, vars=vars_)
+    except StepFailure:
+        return 1  # run_once already printed which step failed
+    except KeyboardInterrupt:
+        return 130
+    return 0
+
+
+# ---------------------------------------------------------------------- #
+# CLI
+# ---------------------------------------------------------------------- #
+def _resolve_account(args, settings: dict, interactive: bool) -> dict:
+    """Command line > saved settings > a prompt (first run). Saves what it asks."""
+    base_url = args.base_url or settings.get("base_url") or ""
+    email = args.email or settings.get("email") or ""
+    password = args.password or settings.get("password") or ""
+    asked = False
+    if interactive and sys.stdin.isatty():
+        if not base_url:
+            base_url = input("Server [{}]: ".format(DEFAULT_BASE_URL)).strip() or DEFAULT_BASE_URL
+            asked = True
+        if not email:
+            email = input("Branch account (email or username): ").strip()
+            asked = True
+        if not password:
+            password = getpass.getpass("Password: ")
+            asked = True
+    base_url = base_url or DEFAULT_BASE_URL
+    if not email or not password:
+        raise SystemExit("no login saved — run:  python -m adb setup")
+    account = {"base_url": base_url, "email": email, "password": password}
+    if asked:
+        save_settings({**settings, **account})
+        print("saved to {}".format(SETTINGS_PATH))
+    return account
+
+
+def cmd_setup(args, settings: dict) -> int:
+    """Ask for the server + branch login, check them, and save them."""
+    settings = dict(settings)
+    for key in ("base_url", "email", "password"):
+        settings.pop(key, None)
+    account = _resolve_account(args, settings, interactive=True)
+    runner = Runner(account["base_url"], account["email"], account["password"])
+    runner.login()
+    runner.refresh_config()
+    print("login ok — branch '{}'".format(runner.restaurant or "?"))
+
+    # Optional: pin a device to an app when several configured apps are on it.
+    apps = dict(settings.get("apps") or {})
+    packages: List[str] = []
+    for p in runner.platforms():
+        pkg = _selector_package(p)
+        if pkg and pkg not in packages:
+            packages.append(pkg)
+    try:
+        devices = [s for s, state in list_devices() if state == "device"]
+    except RuntimeError as exc:
+        print("({})".format(exc))
+        devices = []
+    for serial in devices:
+        installed = AdbDevice(serial=serial).installed_packages()
+        found = [p for p in packages if p in installed]
+        if len(found) > 1 and sys.stdin.isatty():
+            print("device {} has several configured apps:".format(serial))
+            for i, pkg in enumerate(found, start=1):
+                print("  {}. {}".format(i, pkg))
+            choice = input("which one does it run? [1]: ").strip() or "1"
+            try:
+                apps[serial] = found[int(choice) - 1]
+            except (ValueError, IndexError):
+                apps[serial] = found[0]
+    save_settings({**settings, **account, "apps": apps})
+    print("saved to {}".format(SETTINGS_PATH))
+    print("now start it with:  python -m adb")
+    return 0
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    """CLI entry point. Parses args, builds a :class:`Runner`, and runs it."""
+    """CLI entry point."""
     parser = argparse.ArgumentParser(
         prog="python -m adb",
         description=(
-            "Host-side ADB automation runner: drives a locked Android POS over "
-            "ADB using the same server config the mobile app uses."
+            "Host-side ADB automation runner: drives Android devices plugged into "
+            "this PC, using the same server config the mobile app uses."
         ),
     )
     parser.add_argument(
-        "--serial",
-        default=None,
-        help="adb device serial (adb -s <serial>); omit for the single device",
+        "command", nargs="?", default="run",
+        choices=["run", "setup", "devices", "dump", "test"],
+        help="run (default) | setup: save the login | devices: list devices | "
+             "dump: print the device's screen | test <task>: run one task once",
     )
-    parser.add_argument(
-        "--base-url",
-        default="https://api.3alijny.com",
-        help="backend base URL (default: %(default)s)",
-    )
-    parser.add_argument("--email", required=True, help="backend account email")
-    parser.add_argument(
-        "--password", required=True, help="backend account password"
-    )
-    parser.add_argument(
-        "--app",
-        required=True,
-        help=(
-            "targetPackage this terminal runs, e.g. "
-            "com.fastwares.lezzoo.eats.merchant"
-        ),
-    )
-    parser.add_argument(
-        "--poll-interval",
-        type=float,
-        default=5.0,
-        help="seconds between menu-sync poll attempts (default: %(default)s)",
-    )
+    parser.add_argument("task", nargs="?", help="task name for 'test', e.g. lezzo or lezzo_menu")
+    parser.add_argument("--serial", default=None, help="only this device (default: every device)")
+    parser.add_argument("--base-url", default=None, help="backend URL (default: saved, else {})".format(DEFAULT_BASE_URL))
+    parser.add_argument("--email", default=None, help="branch account (default: saved)")
+    parser.add_argument("--password", default=None, help="its password (default: saved)")
+    parser.add_argument("--app", default=None, help="force this targetPackage instead of auto-detecting")
+    parser.add_argument("--poll-interval", type=float, default=5.0, help="seconds between menu on/off polls")
+    parser.add_argument("--out", default=None, help="'dump': write to this file instead of the screen")
+    parser.add_argument("--items", default=None, help="'test' of a menu task: JSON list of {name, available}")
     args = parser.parse_args(argv)
+    settings = load_settings()
 
+    if args.command == "dump":
+        return cmd_dump(args.serial, args.out)
+    if args.command == "setup":
+        return cmd_setup(args, settings)
+
+    if args.command == "devices":
+        runner: Optional[Runner] = None
+        try:
+            account = _resolve_account(args, settings, interactive=False)
+            runner = Runner(account["base_url"], account["email"], account["password"])
+            runner.login()
+            runner.refresh_config()
+        except (SystemExit, RuntimeError):
+            runner = None  # no login yet — still list the devices
+        return cmd_devices(runner)
+
+    account = _resolve_account(args, settings, interactive=True)
     runner = Runner(
+        base_url=account["base_url"],
+        email=account["email"],
+        password=account["password"],
         serial=args.serial,
-        base_url=args.base_url,
-        email=args.email,
-        password=args.password,
         app=args.app,
+        apps=settings.get("apps") or {},
         poll_interval=args.poll_interval,
     )
-    runner.run()
+    if args.command == "test":
+        if not args.task:
+            raise SystemExit("usage: python -m adb test <task>   e.g.  python -m adb test lezzo")
+        runner.login()
+        runner.refresh_config()
+        return cmd_test(runner, args.task, args.serial, args.items)
+
+    try:
+        runner.run()
+    except RuntimeError as exc:
+        _say("engine", "cannot start: {}".format(exc))
+        return 1
     return 0

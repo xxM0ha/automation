@@ -606,6 +606,9 @@ export const MenuPage = ({ setPage }: MenuPageProps) => {
   const [showImport, setShowImport]       = useState(false);
   const [toast, setToast]                 = useState('');
   const [onlyUnlinked, setOnlyUnlinked]   = useState(false);
+  // Items ticked for a bulk on/off.
+  const [selected, setSelected]           = useState<number[]>([]);
+  const [bulkBusy, setBulkBusy]           = useState(false);
 
   const fetchItems = useCallback(async () => {
     try {
@@ -641,6 +644,31 @@ export const MenuPage = ({ setPage }: MenuPageProps) => {
       setItems((prev) => prev.map((item) => item.id === id ? toMenuItem(updated) : item));
     } catch {
       fetchItems();
+    }
+  };
+
+  const toggleSelected = (id: number) =>
+    setSelected((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]);
+
+  // One request for all ticked items → the devices get a single list per app
+  // and toggle them in one run, instead of one run per item.
+  const setSelectedAvailability = async (available: boolean) => {
+    if (selected.length === 0 || bulkBusy) return;
+    setBulkBusy(true);
+    try {
+      const res = await menuApi.setAvailabilityBulk(selected, available);
+      const byId = new Map(res.items.map((it) => [it.id, toMenuItem(it)]));
+      setItems((prev) => prev.map((item) => byId.get(item.id) ?? item));
+      setToast(res.updated > 0
+        ? `تم ${available ? 'تشغيل' : 'إيقاف'} ${res.updated} صنف وإرسالها للأجهزة دفعة واحدة`
+        : `الأصناف المحددة ${available ? 'تعمل' : 'متوقفة'} بالفعل`);
+      setSelected([]);
+    } catch {
+      setToast('تعذّر تحديث الأصناف، حاول مجدداً');
+      fetchItems();
+    } finally {
+      setBulkBusy(false);
+      setTimeout(() => setToast(''), 6000);
     }
   };
 
@@ -815,6 +843,17 @@ export const MenuPage = ({ setPage }: MenuPageProps) => {
                     alt={item.name}
                   />
                   <div className="absolute inset-0 bg-black/20 opacity-0 group-hover:opacity-100 transition-opacity" />
+                  <label
+                    className="absolute top-3 left-3 w-7 h-7 rounded-lg bg-white/90 backdrop-blur shadow-sm flex items-center justify-center cursor-pointer"
+                    title="تحديد للتشغيل/الإيقاف الجماعي"
+                  >
+                    <input
+                      type="checkbox"
+                      className="w-4 h-4 accent-primary cursor-pointer"
+                      checked={selected.includes(item.id)}
+                      onChange={() => toggleSelected(item.id)}
+                    />
+                  </label>
                   {item.tag && (
                     <div className="absolute top-3 right-3">
                       <span className="px-2.5 py-1 bg-white/90 backdrop-blur text-xs font-bold rounded-full text-on-surface shadow-sm">
@@ -970,6 +1009,32 @@ export const MenuPage = ({ setPage }: MenuPageProps) => {
             setTimeout(() => setToast(''), 6000);
           }}
         />
+      )}
+
+      {/* Bulk on/off bar — shown while items are ticked */}
+      {selected.length > 0 && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 bg-white border border-mist shadow-2xl rounded-2xl px-4 py-3 flex flex-wrap items-center gap-3">
+          <span className="text-sm font-bold text-on-surface">تم تحديد {selected.length} صنف</span>
+          <button
+            className="text-xs font-semibold text-on-surface-variant hover:text-on-surface"
+            onClick={() => setSelected(Array.from(new Set([...selected, ...filtered.map((i) => i.id)])))}
+          >
+            تحديد كل الظاهر ({filtered.length})
+          </button>
+          <Button onClick={() => setSelectedAvailability(true)} disabled={bulkBusy}>
+            تشغيل المحدد
+          </Button>
+          <Button variant="secondary" onClick={() => setSelectedAvailability(false)} disabled={bulkBusy}>
+            إيقاف المحدد
+          </Button>
+          <button
+            className="p-1.5 text-on-surface-variant hover:bg-surface-container-low rounded-lg"
+            onClick={() => setSelected([])}
+            title="إلغاء التحديد"
+          >
+            <X size={16} />
+          </button>
+        </div>
       )}
 
       {toast && (

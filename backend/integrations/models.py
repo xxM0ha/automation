@@ -129,6 +129,48 @@ class PrintJob(models.Model):
         return f'PrintJob #{self.order_id} ({"printed" if self.printed else "pending"})'
 
 
+class DeviceLog(models.Model):
+    """An error that happened ON a device (the Android app or the host-side ADB
+    runner), uploaded by the device itself. Server-side failures live elsewhere
+    (WebhookRejection, Order.pos_error); this is the only record of a flow that
+    broke before anything reached the server. Shown on the developer page."""
+    SOURCE_APP = 'app'
+    SOURCE_ADB = 'adb'
+    SOURCE_CHOICES = [(SOURCE_APP, 'Android app'), (SOURCE_ADB, 'ADB runner')]
+
+    restaurant = models.ForeignKey(
+        'restaurants.Restaurant', on_delete=models.CASCADE, related_name='device_logs'
+    )
+    source = models.CharField(max_length=10, choices=SOURCE_CHOICES, default=SOURCE_APP)
+    device_id = models.CharField(max_length=100, blank=True, default='')
+    device_model = models.CharField(max_length=120, blank=True, default='')
+    os_version = models.CharField(max_length=40, blank=True, default='')
+    app_version = models.CharField(max_length=40, blank=True, default='')
+    # The config task that was running (e.g. "toters", "toters_menu") — a task
+    # slug, not a Platform row, so it stays free text.
+    platform = models.CharField(max_length=60, blank=True, default='')
+    # flow | accessibility | crash | app
+    kind = models.CharField(max_length=20, blank=True, default='flow')
+    message = models.TextField()
+    # The engine log lines that led up to the error, oldest first.
+    context = models.JSONField(default=list, blank=True)
+    # What was on screen when it failed: foreground package + visible texts.
+    screen_package = models.CharField(max_length=200, blank=True, default='')
+    screen_texts = models.JSONField(default=list, blank=True)
+    # How many times the device saw this same error before reporting it again
+    # (devices throttle a repeating error instead of flooding the server).
+    count = models.PositiveIntegerField(default=1)
+    occurred_at = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ['-occurred_at']
+        indexes = [models.Index(fields=['restaurant', '-occurred_at'], name='devicelog_rest_occurred_idx')]
+
+    def __str__(self):
+        return f'{self.source}/{self.platform or "-"}: {self.message[:60]}'
+
+
 class Device(models.Model):
     """A mobile device registered for FCM push (menu-sync, etc.)."""
     restaurant = models.ForeignKey(

@@ -7,5 +7,6 @@ urlpatterns = [
     path('app-config/', dev_views.dev_app_config, name='dev-app-config'),
     path('orders/', dev_views.dev_orders, name='dev-orders'),
     path('rejections/', dev_views.dev_rejections, name='dev-rejections'),
+    path('device-logs/', dev_views.dev_device_logs, name='dev-device-logs'),
     path('parse-preview/', dev_views.dev_parse_preview, name='dev-parse-preview'),
 ]

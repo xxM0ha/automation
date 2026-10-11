@@ -23,10 +23,12 @@ must not rely on non-ASCII input succeeding.
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
 import subprocess
 import time
-from typing import List, Optional
+from typing import List, Optional, Set, Tuple
 
 # Default timeout (seconds) for every adb invocation.
 _TIMEOUT = 20
@@ -36,6 +38,46 @@ _DUMP_PATH = "/sdcard/prime_dump.xml"
 
 # Shell characters that must be escaped inside an `input text "..."` argument.
 _SHELL_SPECIAL = set('\\"\'`$&|;<>()*?![]{}~#')
+
+
+def adb_binary() -> str:
+    """Path of the ``adb`` executable to use.
+
+    Order: the ``ORDO_ADB`` environment variable, then a copy shipped next to
+    this script (``adb/platform-tools/adb[.exe]`` or ``adb/adb[.exe]`` — so a
+    branch PC needs nothing installed but Python), then whatever is on PATH.
+    """
+    override = os.environ.get("ORDO_ADB")
+    if override:
+        return override
+    here = os.path.dirname(os.path.abspath(__file__))
+    exe = "adb.exe" if os.name == "nt" else "adb"
+    for candidate in (os.path.join(here, "platform-tools", exe), os.path.join(here, exe)):
+        if os.path.isfile(candidate):
+            return candidate
+    return shutil.which("adb") or "adb"
+
+
+def list_devices() -> List[Tuple[str, str]]:
+    """Devices adb currently sees, as ``[(serial, state)]``.
+
+    ``state`` is ``"device"`` when usable, ``"unauthorized"`` when the
+    "Allow USB debugging?" dialog has not been accepted on the device, or
+    ``"offline"``. Raises ``RuntimeError`` if adb itself cannot be run.
+    """
+    try:
+        proc = subprocess.run(
+            [adb_binary(), "devices"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("cannot run adb: {}".format(exc))
+    out = []
+    for line in (proc.stdout or "").splitlines()[1:]:
+        parts = line.split()
+        if len(parts) >= 2:
+            out.append((parts[0], parts[1]))
+    return out
 
 
 class AdbDevice:
@@ -57,7 +99,7 @@ class AdbDevice:
     # ------------------------------------------------------------------ #
     def _base(self) -> List[str]:
         """Return the adb command prefix, including ``-s <serial>`` if set."""
-        cmd = ["adb"]
+        cmd = [adb_binary()]
         if self.serial:
             cmd += ["-s", self.serial]
         return cmd
@@ -73,6 +115,7 @@ class AdbDevice:
             capture_output=True,
             text=True,
             encoding="utf-8",
+            errors="replace",
             timeout=_TIMEOUT,
         )
         if proc.returncode != 0:
@@ -234,6 +277,11 @@ class AdbDevice:
         if "No activities found" in out or "Error" in out:
             return False
         return True
+
+    def installed_packages(self) -> Set[str]:
+        """Package names installed on the device (``pm list packages``)."""
+        out = self.shell("pm", "list", "packages")
+        return {ln.split(":", 1)[1].strip() for ln in out.splitlines() if ln.startswith("package:")}
 
     def current_package(self) -> Optional[str]:
         """Return the package name of the foreground app, or ``None``.

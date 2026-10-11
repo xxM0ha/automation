@@ -183,6 +183,52 @@ def dev_rejections(request):
     return Response(out)
 
 
+@api_view(['GET'])
+def dev_device_logs(request):
+    """Errors uploaded by devices (Android app / ADB runner) across ALL
+    restaurants — dev only.
+    ?restaurant=slug  ?source=app|adb  ?platform=task-slug  ?limit=N (max 300)."""
+    denied = _require_dev(request)
+    if denied is not None:
+        return denied
+
+    from integrations.models import DeviceLog
+    qs = DeviceLog.objects.select_related('restaurant')
+    restaurant = request.query_params.get('restaurant')
+    if restaurant:
+        qs = qs.filter(restaurant__slug=restaurant)
+    source = request.query_params.get('source')
+    if source:
+        qs = qs.filter(source=source)
+    platform = request.query_params.get('platform')
+    if platform:
+        qs = qs.filter(platform=platform)
+    try:
+        limit = min(int(request.query_params.get('limit', 100)), 300)
+    except (TypeError, ValueError):
+        limit = 100
+
+    out = [{
+        'id': d.id,
+        'restaurant': d.restaurant.slug,
+        'restaurant_name': d.restaurant.name,
+        'source': d.source,
+        'device_id': d.device_id,
+        'device_model': d.device_model,
+        'os_version': d.os_version,
+        'app_version': d.app_version,
+        'platform': d.platform,
+        'kind': d.kind,
+        'message': d.message,
+        'context': d.context,
+        'screen_package': d.screen_package,
+        'screen_texts': d.screen_texts,
+        'count': d.count,
+        'occurred_at': d.occurred_at.isoformat(),
+    } for d in qs[:limit]]
+    return Response(out)
+
+
 @api_view(['POST'])
 def dev_parse_preview(request):
     """Run a platform parser on pasted raw text and return the result (dev only).

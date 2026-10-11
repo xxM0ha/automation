@@ -3,6 +3,10 @@ import messaging from '@react-native-firebase/messaging';
 
 import App from './App';
 import { handleMenuSyncPush } from './src/lib/fcm';
+import { installGlobalErrorReporter } from './src/lib/deviceLog';
+
+// Uncaught JS errors go to the device error log (uploaded to the dashboard).
+installGlobalErrorReporter();
 
 // Headless background/quit handler for FCM data messages. Runs natively even
 // when the app is backgrounded or killed — turns a menuSync push into an

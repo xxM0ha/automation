@@ -6,7 +6,8 @@
 #
 # Requirements:
 #   * Python 3.9 or newer
-#   * Android platform-tools providing the `adb` binary, on PATH
+#   * Android platform-tools providing the `adb` binary — either on PATH or
+#     unzipped into this folder as adb/platform-tools/ (see README.md)
 #       Debian/Raspberry Pi OS:  sudo apt install android-tools-adb
 #
 # (This file is intentionally empty of packages — `pip install -r requirements.txt`

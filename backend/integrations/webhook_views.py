@@ -131,7 +131,10 @@ def receive_webhook(request):
         from django.utils import timezone
         from datetime import timedelta
         cutoff = timezone.now() - timedelta(minutes=30)
-        if Order.objects.filter(platform=platform, external_id=ext_id,
+        # Scoped to this restaurant: order numbers are short per-branch counters
+        # (Yammak keeps only the last 3 digits), so two branches can hold the
+        # same number at the same time and must not swallow each other's order.
+        if Order.objects.filter(platform=platform, restaurant=restaurant, external_id=ext_id,
                                 created_at__gte=cutoff).exists():
             logger.info('[webhook] %s duplicate order %s within 30min, ignoring',
                         platform_slug, ext_id)
@@ -145,12 +148,22 @@ def receive_webhook(request):
     # ID didn't parse gets a fresh auto- id and would otherwise create a duplicate
     # order on every repeat. Collapse repeats (auto- ids and re-sends alike) by a
     # hash of the parsed content within a 30-min window.
+    #
+    # Identical content alone does NOT make two orders the same one: two
+    # customers do order the exact same items, and most apps give us no customer
+    # name to tell them apart. So when BOTH captures carry a real order number
+    # and the numbers differ, they are different orders and both are accepted.
+    # The content match only decides when a number is missing on either side.
     from django.utils import timezone as _tz
     from datetime import timedelta as _td
     content_hash = _content_hash(platform_slug, restaurant_slug, draft)
     _win = _tz.now() - _td(minutes=30)
+    _has_id = not ext_id.startswith('auto-')
     for _o in Order.objects.filter(platform=platform, restaurant=restaurant,
-                                   created_at__gte=_win).only('raw_payload'):
+                                   created_at__gte=_win).only('raw_payload', 'external_id'):
+        if (_has_id and not _o.external_id.startswith('auto-')
+                and _o.external_id != ext_id):
+            continue
         if (_o.raw_payload or {}).get('content_hash') == content_hash:
             logger.info('[webhook] %s duplicate-by-content, ignoring', platform_slug)
             return Response({'status': 'received', 'parsed': True, 'duplicate': True,

@@ -19,10 +19,13 @@ Layout:
 * :mod:`adb.backend`     — backend client (login / fetch_config / send / poll).
 * :mod:`adb.interpreter` — :class:`FlowInterpreter`, runs a platform's flow.
 * :mod:`adb.runner`      — :class:`Runner`, the orchestrator wired up here.
+* :mod:`adb.devicelog`   — the device error log uploaded to the dashboard.
 
-Run it as a module::
+One PC drives every device plugged into it: each device runs the tasks of the
+delivery app installed on it, and the login is saved after the first run. Run
+it as a module (see README.md for setup and the helper commands)::
 
-    python -m adb --serial <id> --email <e> --password <p> --app <package>
+    python -m adb
 """
 
 from __future__ import annotations

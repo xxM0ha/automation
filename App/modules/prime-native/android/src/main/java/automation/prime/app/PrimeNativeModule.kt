@@ -22,6 +22,8 @@ import expo.modules.kotlin.modules.ModuleDefinition
  *     Prime being backgrounded.
  *   - startEngineService / stopEngineService — the foreground notification
  *     that keeps the process from being killed.
+ *   - configureDeviceLog / reportDeviceError — the device-side error log
+ *     (see [DeviceLog]).
  *
  * Also relays:
  *   - onAccessibilityState  — accessibility service connect/disconnect
@@ -61,8 +63,13 @@ class PrimeNativeModule : Module() {
 
     OnCreate {
       current = this@PrimeNativeModule
+      appContext.reactContext?.let { DeviceLog.init(it) }
       engineRunner = EngineRunner(
         onLog = { slug, level, message, depth ->
+          // Every engine line feeds the device error log; an error line is
+          // reported (with this trail + the screen) even if JS is asleep.
+          DeviceLog.trail(slug, level, message, depth)
+          if (level == "error") DeviceLog.report(slug, "flow", message)
           sendEvent("onEngineLog", mapOf(
             "platform" to slug,
             "level" to level,
@@ -284,6 +291,21 @@ class PrimeNativeModule : Module() {
 
     AsyncFunction("resumeEngine") { platform: String ->
       engineRunner?.resume(platform)
+    }
+
+    // ---- device error log --------------------------------------------------
+
+    // Where device-side errors are uploaded. Called on login (and with nulls
+    // on logout); queued reports are flushed as soon as it is set.
+    AsyncFunction("configureDeviceLog") { baseUrl: String?, token: String? ->
+      DeviceLog.configure(appContext.reactContext, baseUrl, token)
+    }
+
+    // Report an error that happened in JS (FCM, config fetch, an uncaught
+    // exception) through the same queue as the native engine's errors.
+    AsyncFunction("reportDeviceError") { platform: String, kind: String, message: String ->
+      appContext.reactContext?.let { DeviceLog.init(it) }
+      DeviceLog.report(platform, kind, message, captureScreen = false)
     }
 
     // ---- foreground service (keep the engine process alive) ---------------

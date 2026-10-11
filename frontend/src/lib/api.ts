@@ -299,6 +299,9 @@ export const menu = {
   createCategory: (nameAr: string) => post<ApiMenuCategory>('/menu/categories/', { name_ar: nameAr, sort_order: 0 }),
   toggleAvailability: (id: number) =>
     patch<ApiMenuItem>(`/menu/items/${id}/availability/`, undefined),
+  /** Turn several items on/off at once — the devices get one message per app. */
+  setAvailabilityBulk: (itemIds: number[], available: boolean) =>
+    post<{ updated: number; items: ApiMenuItem[] }>('/menu/items/availability/bulk/', { itemIds, available }),
   update: (id: number, data: Record<string, unknown>) =>
     patch<ApiMenuItem>(`/menu/items/${id}/`, data),
   create: (data: Record<string, unknown>) =>
@@ -543,6 +546,29 @@ export interface DevRejection {
   createdAt: string;
 }
 
+/** An error that happened on a device (Android app / ADB runner), uploaded by it. */
+export interface DevDeviceLog {
+  id: number;
+  restaurant: string;
+  restaurantName: string;
+  source: 'app' | 'adb';
+  deviceId: string;
+  deviceModel: string;
+  osVersion: string;
+  appVersion: string;
+  /** The config task that was running, e.g. "toters" or "toters_menu". */
+  platform: string;
+  kind: string;
+  message: string;
+  /** Engine log lines that led up to the error, oldest first. */
+  context: string[];
+  screenPackage: string;
+  screenTexts: string[];
+  /** Times the device saw this same error before reporting it again. */
+  count: number;
+  occurredAt: string;
+}
+
 export interface DevParseResult {
   parsed: boolean;
   detail?: string;
@@ -579,6 +605,14 @@ export const devApi = {
   },
   rejections: (platform?: string) =>
     get<DevRejection[]>(`/dev/rejections/${platform ? `?platform=${platform}` : ''}`),
+  deviceLogs: (params: { restaurant?: string; source?: string; limit?: number } = {}) => {
+    const q = new URLSearchParams();
+    if (params.restaurant) q.set('restaurant', params.restaurant);
+    if (params.source) q.set('source', params.source);
+    if (params.limit) q.set('limit', String(params.limit));
+    const qs = q.toString();
+    return get<DevDeviceLog[]>(`/dev/device-logs/${qs ? `?${qs}` : ''}`);
+  },
   parsePreview: (body: { platform: string; rawText: string; restaurant?: string }) =>
     post<DevParseResult>('/dev/parse-preview/', body),
 };

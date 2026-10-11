@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, type FC } from 'react';
-import { ChevronLeft, RefreshCw, AlertTriangle, CheckCircle2, XCircle, Play, ChevronDown } from 'lucide-react';
+import { ChevronLeft, RefreshCw, AlertTriangle, CheckCircle2, XCircle, Play, ChevronDown, Smartphone } from 'lucide-react';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
 import { Sidebar } from '../components/layout/Sidebar';
@@ -9,6 +9,7 @@ import {
   devApi,
   type DevOrder,
   type DevRejection,
+  type DevDeviceLog,
   type DevParseResult,
   type DevRestaurant,
 } from '../lib/api';
@@ -19,11 +20,12 @@ interface DeveloperPageProps {
   setPage: (p: Page) => void;
 }
 
-type Tab = 'orders' | 'problems' | 'preview' | 'restaurants';
+type Tab = 'orders' | 'problems' | 'devices' | 'preview' | 'restaurants';
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'orders', label: 'الطلبات' },
   { id: 'problems', label: 'المشاكل' },
+  { id: 'devices', label: 'أخطاء الأجهزة' },
   { id: 'restaurants', label: 'المطاعم' },
   { id: 'preview', label: 'معاينة المحلّل' },
 ];
@@ -168,6 +170,69 @@ const RejectionCard: FC<{ r: DevRejection }> = ({ r }) => {
   );
 }
 
+const DEVICE_SOURCE: Record<string, string> = { app: 'تطبيق أندرويد', adb: 'ADB' };
+const DEVICE_KIND: Record<string, string> = {
+  flow: 'تدفق',
+  accessibility: 'خدمة الوصول',
+  crash: 'تعطّل',
+  app: 'التطبيق',
+};
+
+const DeviceLogCard: FC<{ d: DevDeviceLog }> = ({ d }) => {
+  const [open, setOpen] = useState(false);
+  const device = [d.deviceModel, d.osVersion && `Android ${d.osVersion}`, d.appVersion && `v${d.appVersion}`]
+    .filter(Boolean).join(' · ');
+  return (
+    <Card className="p-4 border-r-4 border-r-red-400">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <Smartphone size={14} className="text-red-500" />
+            <span className="font-bold text-on-surface">{d.restaurantName}</span>
+            <span className="text-xs text-on-surface-variant">{d.restaurant}{d.platform ? ` · ${d.platform}` : ''}</span>
+            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-surface-container-low text-on-surface-variant">
+              {DEVICE_SOURCE[d.source] ?? d.source}
+            </span>
+            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-50 text-red-600">
+              {DEVICE_KIND[d.kind] ?? d.kind}
+            </span>
+            {d.count > 1 && (
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">
+                تكرّر {d.count} مرة
+              </span>
+            )}
+          </div>
+          <p className="text-xs text-red-600 mt-1 font-semibold whitespace-pre-wrap break-words">{d.message}</p>
+          <p className="text-[10px] text-on-surface-variant mt-1">
+            {timeAgo(d.occurredAt)}{device ? ` · ${device}` : ''}{d.deviceId ? ` · ${d.deviceId}` : ''}
+          </p>
+        </div>
+        <button onClick={() => setOpen((v) => !v)} className="p-1.5 text-on-surface-variant hover:bg-surface-container-low rounded-lg shrink-0">
+          <ChevronDown size={16} className={cn('transition-transform', open && 'rotate-180')} />
+        </button>
+      </div>
+      {open && (
+        <div className="mt-3 space-y-3">
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant mb-1">الخطوات قبل الخطأ</p>
+            <pre className="text-[10px] leading-relaxed text-on-surface-variant bg-surface-container-low rounded-lg p-3 overflow-x-auto whitespace-pre-wrap" dir="rtl">
+              {d.context.length > 0 ? d.context.join('\n') : '(لا توجد خطوات مسجّلة)'}
+            </pre>
+          </div>
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant mb-1">
+              الشاشة لحظة الخطأ{d.screenPackage ? ` · ${d.screenPackage}` : ''}
+            </p>
+            <pre className="text-[10px] leading-relaxed text-on-surface-variant bg-surface-container-low rounded-lg p-3 overflow-x-auto whitespace-pre-wrap" dir="rtl">
+              {d.screenTexts.length > 0 ? d.screenTexts.join(' · ') : '(لم تُلتقط الشاشة)'}
+            </pre>
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
 export const DeveloperPage = ({ setPage }: DeveloperPageProps) => {
   const [tab, setTab] = useState<Tab>('orders');
 
@@ -175,6 +240,9 @@ export const DeveloperPage = ({ setPage }: DeveloperPageProps) => {
   const [problemOrders, setProblemOrders] = useState<DevOrder[]>([]);
   const [rejections, setRejections] = useState<DevRejection[]>([]);
   const [restaurants, setRestaurants] = useState<DevRestaurant[]>([]);
+  const [deviceLogs, setDeviceLogs] = useState<DevDeviceLog[]>([]);
+  const [dlRestaurant, setDlRestaurant] = useState('');
+  const [dlSource, setDlSource] = useState('');
   const [loading, setLoading] = useState(false);
 
   const load = useCallback(async (t: Tab) => {
@@ -189,6 +257,12 @@ export const DeveloperPage = ({ setPage }: DeveloperPageProps) => {
         ]);
         setProblemOrders(po);
         setRejections(rej);
+      } else if (t === 'devices') {
+        setDeviceLogs(await devApi.deviceLogs({
+          restaurant: dlRestaurant || undefined,
+          source: dlSource || undefined,
+          limit: 200,
+        }));
       } else if (t === 'restaurants') {
         setRestaurants(await devApi.restaurants());
       }
@@ -197,7 +271,7 @@ export const DeveloperPage = ({ setPage }: DeveloperPageProps) => {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [dlRestaurant, dlSource]);
 
   const togglePrinting = async (slug: string, current: boolean) => {
     setRestaurants((prev) => prev.map((r) => r.slug === slug ? { ...r, printingEnabled: !current } : r));
@@ -311,6 +385,39 @@ export const DeveloperPage = ({ setPage }: DeveloperPageProps) => {
               {!loading && problemOrders.length === 0 && rejections.length === 0 && (
                 <div className="flex items-center gap-2 text-sm text-green-600 py-10 justify-center">
                   <CheckCircle2 size={18} /> لا توجد مشاكل 🎉
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Device errors — uploaded by the Android app / ADB runner */}
+          {tab === 'devices' && (
+            <div className="space-y-4">
+              <div className="flex flex-wrap gap-2">
+                <select
+                  value={dlRestaurant}
+                  onChange={(e) => setDlRestaurant(e.target.value)}
+                  className="rounded-xl border border-mist px-3 py-2.5 text-sm bg-white outline-none focus:ring-2 focus:ring-primary/20"
+                >
+                  <option value="">كل المطاعم</option>
+                  {restaurants.map((r) => <option key={r.slug} value={r.slug}>{r.name}</option>)}
+                </select>
+                <select
+                  value={dlSource}
+                  onChange={(e) => setDlSource(e.target.value)}
+                  className="rounded-xl border border-mist px-3 py-2.5 text-sm bg-white outline-none focus:ring-2 focus:ring-primary/20"
+                >
+                  <option value="">كل الأجهزة</option>
+                  <option value="app">تطبيق أندرويد</option>
+                  <option value="adb">ADB</option>
+                </select>
+              </div>
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                {deviceLogs.map((d) => <DeviceLogCard key={d.id} d={d} />)}
+              </div>
+              {!loading && deviceLogs.length === 0 && (
+                <div className="flex items-center gap-2 text-sm text-green-600 py-10 justify-center">
+                  <CheckCircle2 size={18} /> لا توجد أخطاء من الأجهزة
                 </div>
               )}
             </div>

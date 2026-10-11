@@ -26,6 +26,15 @@ object ScreenLock {
   /** token -> priority, for everyone currently waiting to acquire. */
   private val waiters = ConcurrentHashMap<String, Int>()
 
+  /**
+   * Counts every successful [acquire], by any task. A task that gave the screen
+   * up to watch compares this with the value it saw then: if it moved, some
+   * other task used the screen in between.
+   */
+  @Volatile
+  var acquisitions: Long = 0L
+    private set
+
   /** True while some task holds the screen for an action phase. */
   val isHeld: Boolean
     get() = holder != null
@@ -44,6 +53,7 @@ object ScreenLock {
           val highestWaiting = waiters.values.maxOrNull() ?: priority
           if (holder == null && priority >= highestWaiting) {
             holder = token
+            acquisitions += 1
             waiters.remove(token)
             acquired = true
           }

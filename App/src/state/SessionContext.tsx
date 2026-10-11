@@ -14,6 +14,7 @@ import {
   saveSession,
   type Session,
 } from '../lib/auth';
+import { configureDeviceLog } from '../lib/deviceLog';
 
 type SessionApi = {
   session: Session | null;
@@ -41,6 +42,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       active = false;
     };
   }, []);
+
+  // Device errors are uploaded under the logged-in account; anything queued
+  // while logged out (or offline) is flushed once this is set.
+  useEffect(() => {
+    if (!loading) configureDeviceLog(session);
+  }, [session, loading]);
 
   const signIn = useCallback(
     async (baseUrl: string, email: string, password: string) => {

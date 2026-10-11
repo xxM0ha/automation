@@ -1,154 +1,129 @@
-# `adb` — host-side automation runner for locked Android POS terminals
+# `adb` — run delivery apps from a PC, for devices the Ordo app can't control
 
-This package drives a **locked Android POS terminal over ADB** from a host
-machine (a Raspberry Pi or a small mini-PC sitting next to the terminal). It is
-the ADB-port equivalent of the mobile app's automation engine: it reuses the
-**same server-driven config** the app loads and runs the same step-script flows,
-but executes them through `adb shell` instead of the on-device native engine.
+Some delivery apps can't be driven by the Ordo Android app (locked POS
+terminals that refuse app installs, apps that block accessibility services).
+This package drives those devices **from a PC over USB** instead. It is the same
+engine as the app — same server config, same flow steps — but every action goes
+through `adb shell` rather than an on-device service.
 
-## Why ADB from a host?
+One PC drives **every device plugged into it**. Nothing is configured on the PC
+except the branch login:
 
-The POS terminals are **locked down** — they do not allow installing apps. We
-therefore cannot deploy the mobile app (or any helper such as ADBKeyBoard) onto
-the terminal itself. The only thing we *can* do is connect a host machine over
-USB and issue `adb shell` commands: `uiautomator dump` to read the screen, and
-`input` / `am` / `monkey` to tap, type, and launch apps. This package is the
-orchestrator that turns the server config into those ADB actions.
+* The automation config lives **on the server** (dashboard → الأتمتة). The
+  script fetches it at start and again every 20 seconds, so editing a config in
+  the dashboard takes effect on the running PC without touching it.
+* For each plugged-in device the script checks which delivery app from the
+  config is **installed on it** and runs that app's tasks. Plug a device in and
+  it starts; unplug it and it stops. No restart.
 
-It mirrors the app in two ways:
+## Set up a branch PC (Windows)
 
-* **`EngineController` equivalent** — it starts the continuous order-watching
-  tasks for this terminal's app (those whose `control` is `"running"`).
-* **FCM menu queue equivalent** — it polls the backend for queued menu-sync
-  jobs and runs the matching `<platform>_menu` flow one-shot, injecting the
-  pushed items as the `pushItems` flow variable (exactly as the app's FCM
-  handler does).
+1. **Python** — install Python 3.9+ from <https://www.python.org/downloads/> and
+   tick **"Add python.exe to PATH"**. No other packages are needed.
+2. **adb** — download "SDK Platform-Tools for Windows" from
+   <https://developer.android.com/tools/releases/platform-tools>, unzip it, and
+   put the `platform-tools` folder **inside this `adb` folder**
+   (`adb\platform-tools\adb.exe`). The script finds it there; nothing to add to
+   PATH.
+3. **Copy this `adb` folder** to the PC (any location, e.g. `C:\ordo\adb`).
+4. **On each device:** Settings → Developer options → **USB debugging** on. Plug
+   it in, unlock it, and tap **Allow** on the "Allow USB debugging?" dialog —
+   tick "Always allow from this computer".
+5. **Double-click `ordo-adb.bat`.** The first run asks for the server and the
+   branch account (email or branch username) and saves them; from then on it
+   starts on its own. It restarts itself if it ever exits, so it can be left
+   running. To start it with Windows, put a shortcut to `ordo-adb.bat` in the
+   Startup folder (`Win+R` → `shell:startup`).
 
-## How it reuses the server config
+On Linux / Raspberry Pi: `sudo apt install android-tools-adb`, then
+`python3 -m adb` from the folder that contains `adb/`.
 
-On startup the runner logs in to the backend and calls `fetch_config`, getting
-the **identical** `AutomationConfig` the mobile app consumes:
+The login is saved in `%USERPROFILE%\.ordo-adb\settings.json` (plain text, like
+the print agent's). Use the **branch's own account** — orders are filed under
+the branch of the account that is logged in.
 
-```jsonc
-{
-  "backend":   { "baseUrl": "https://api.3alijny.com", "restaurant": "laffe" },
-  "platforms": [
-    {
-      "platform": "toters", "label": "Toters",
-      "targetPackage": "com.toters.merchant",
-      "control": "running",          // continuous task → autostarts
-      "runMode": "loop",
-      "selectors": { ... }, "flow": [ ... ], "vars": { ... }
-    },
-    {
-      "platform": "lezzo_menu",      // name ends in _menu → menu-sync task
-      "targetPackage": "com.fastwares.lezzoo.eats.merchant",
-      "runMode": "once",
-      "flow": [ ... ]
-    }
-  ]
-}
-```
+## Commands
 
-Because it's the same config, **changing the panel updates both the app and this
-runner** — no code change needed. The runner re-fetches the config every few
-minutes so edits propagate while it's running.
+Run from the folder that contains `adb/` (`ordo-adb.bat <command>` does the same):
 
-* A platform whose name **ends in `_menu`** is a push/poll-driven menu-sync task
-  (`runMode: "once"`).
-* Every other platform is a **continuous order task** that autostarts when its
-  `control` is `"running"`.
+| Command | What it does |
+| --- | --- |
+| `python -m adb` | Run: drive every plugged-in device. |
+| `python -m adb setup` | Enter / change the saved login; choose the app for a device that has several. |
+| `python -m adb devices` | List plugged-in devices and which config apps are installed on each. |
+| `python -m adb dump` | Print what is on a device's screen right now (for writing selectors). |
+| `python -m adb test <task>` | Run one task from the server config once, printing every step. |
 
-The runner only handles platforms whose `targetPackage` matches the `--app` you
-pass, so each terminal runs just its own app's tasks.
+Options: `--serial <id>` (one device only), `--app <package>` (force an app
+instead of auto-detecting), `--base-url`, `--email`, `--password` (override the
+saved login), `--out <file>` (for `dump`), `--items '<json>'` (for `test` of a
+menu task).
 
-## Raspberry Pi / host setup
+## Adding a new app
 
-1. Install ADB (no Python packages are needed — standard library only):
+The config for an app is a **task** in the server's automation config — the
+same document, and the same step types, the Android app uses. Nothing in this
+folder changes.
 
-   ```sh
-   sudo apt install android-tools-adb
+1. Plug the device in and open the app on the screen you care about.
+2. `python -m adb dump` — prints the foreground **package** and every element's
+   `text`, `contentDesc` and `viewId`. Those are exactly what a selector can
+   match:
+
+   ```
+   package: com.example.merchant
+   text="طلب جديد"  viewId="order_title"  clickable  bounds=[40, 300, 1040, 420]
    ```
 
-2. On the Android terminal, enable **Developer options → USB debugging**.
+3. In the dashboard (الأتمتة), add the task. An order task needs
+   `targetPackage`, `control: "running"`, `runMode: "continuous"`, its
+   `selectors` and its `flow`. A menu on/off task is named **`<platform>_menu`**
+   (e.g. `lezzo_menu`) with `runMode: "once"`; its flow loops over `pushItems`.
+4. `python -m adb test <task>` runs it once and shows each step, so a wrong
+   selector is obvious. (It really runs — an order it reads is sent to the
+   server.) For a menu task:
+   `python -m adb test lezzo_menu --items "[{\"name\": \"Pepsi\", \"available\": false}]"`
+5. When it works, leave `control: "running"` — every PC with that app on a
+   plugged-in device picks it up within 20 seconds.
 
-3. Plug the terminal into the Pi over USB. The first connection pops an
-   **"Allow USB debugging?"** dialog on the terminal — tap **Allow** (check
-   "always allow from this computer"). The terminal must be unlocked to show it.
+`python -m adb devices` shows, per device, which configured apps it found — if a
+device shows "(none installed)", the task's `targetPackage` doesn't match the
+package printed by `dump`.
 
-4. Confirm the device is visible and authorized:
+## Orders and menu on/off share one screen
 
-   ```sh
-   adb devices
-   # List of devices attached
-   # ABCD1234        device          <- "device" = good; "unauthorized" = re-authorize
-   ```
+A device has one screen, so two flows must never tap it at once:
 
-   Note the serial (`ABCD1234`) if more than one device is attached.
+* An order task holds the screen **only while it is handling an order**. While
+  it is just watching for a new order, the screen is free.
+* A menu on/off run takes the screen when it is free. If an order is being
+  handled, the menu run **waits for it to finish**; an order that arrives during
+  a menu run is handled right after.
+* Turning several items on/off in the dashboard at once arrives as **one job
+  with the whole list** — one run of the menu flow, not one per item.
+* After a menu run, the order task starts its flow over (re-opening the app), so
+  it goes back to its orders screen.
 
-## Running
+## Errors
 
-```sh
-python -m adb \
-  --serial ABCD1234 \
-  --email you@example.com \
-  --password 'your-password' \
-  --app com.fastwares.lezzoo.eats.merchant
-```
+Every failure — a step that didn't find its element, an order that couldn't be
+sent, adb losing the device — is printed here **and uploaded to the dashboard**
+(المطوّر → أخطاء الأجهزة) with the steps before it and the text that was on
+screen. Errors made while offline are kept in `~/.ordo-adb/` and sent later. A
+repeating error is sent once, then again after 10 minutes with a repeat count.
 
-Arguments:
+## Known limitation — typing Arabic
 
-| Flag              | Default                     | Meaning                                                        |
-| ----------------- | --------------------------- | -------------------------------------------------------------- |
-| `--serial`        | (single device)             | adb serial (`adb -s <serial>`); omit if only one device        |
-| `--base-url`      | `https://api.3alijny.com`   | backend base URL                                               |
-| `--email`         | *(required)*                | backend account email                                          |
-| `--password`      | *(required)*                | backend account password                                       |
-| `--app`           | *(required)*                | the `targetPackage` this terminal runs                         |
-| `--poll-interval` | `5`                         | seconds between menu-sync poll attempts                        |
+Android's `input text` cannot type non-ASCII characters. The script tries the
+clipboard (`cmd clipboard set-text` + paste), but that is missing or restricted
+on many devices. So **searching a menu item by typing its Arabic name often
+fails over ADB**. Where possible, write menu flows that find the item without
+typing (scroll until it appears, then `tapInRow`).
 
-Stop it with **Ctrl-C**; it signals its worker threads and exits cleanly.
+## Layout
 
-### One device, one flow at a time
-
-A single device is effectively **serial** — two `adb shell` actions at once
-would interleave taps on one screen. So:
-
-* **One** continuous task → its own worker thread running `run_loop`.
-* **More than one** continuous task → a single thread that **round-robins** one
-  `run_once` per platform, so only one flow ever touches the device.
-
-The menu poller shares a device lock with the order worker, so a menu sync and
-an order flow never run against the device simultaneously.
-
-## Menu-sync polling — backend TODO
-
-The menu-sync loop calls `poll_pending`, which expects a
-**`GET /api/pending-syncs/`** endpoint (or equivalent). **This endpoint does not
-exist on the backend yet.** Until it ships, `poll_pending` returns `[]` and the
-menu loop is a harmless no-op.
-
-When the endpoint lands it should return, for the authenticated restaurant, a
-list of jobs shaped like:
-
-```json
-[
-  { "platform": "lezzo", "items": [ { "name": "...", "available": false } ] }
-]
-```
-
-The runner maps `platform` → its `<platform>_menu` flow and runs it once with
-`vars = {"pushItems": items}`. This replaces the FCM push the mobile app uses.
-
-## Known limitation — Arabic / non-ASCII text input
-
-Android's `input text` command **cannot type non-ASCII characters** (Arabic,
-emoji, accented Latin) — it silently drops or mangles them. `AdbDevice` makes a
-best-effort clipboard attempt (`cmd clipboard set-text` + `KEYCODE_PASTE`), but
-that is unreliable: `cmd clipboard` is missing or restricted on many OEM builds,
-and pasting needs a focused, paste-capable field.
-
-The practical consequence: **searching a menu item by its Arabic name will often
-fail.** Robust non-ASCII entry needs an on-device IME (e.g. ADBKeyBoard) — which
-we cannot install on the locked terminal. Where possible, design flows to match
-items without typing Arabic (scroll/visual match, ASCII codes/SKUs, etc.).
+* `device.py` — the `adb shell` driver (and where the adb binary is found).
+* `backend.py` — server client (login, config, order webhook, menu job poll).
+* `interpreter.py` — runs a task's flow; shares the screen lock.
+* `runner.py` — supervises the devices; the commands above.
+* `devicelog.py` — the error log uploaded to the dashboard.

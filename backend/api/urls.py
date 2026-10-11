@@ -12,6 +12,7 @@ urlpatterns = [
     path('notifications/', include('notifications_app.urls')),
     path('webhooks/', include('integrations.webhook_urls')),
     path('devices/', include('integrations.device_urls')),
+    path('device-logs/', include('integrations.device_log_urls')),
     path('pending-syncs/', include('integrations.pending_urls')),
     path('print-jobs/', include('integrations.print_urls')),
     path('printers/', include('integrations.printer_urls')),

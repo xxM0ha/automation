@@ -42,6 +42,10 @@ class PrimeAccessibilityService : AccessibilityService() {
     super.onDestroy()
     if (instance === this) instance = null
     PrimeNativeModule.notifyAccessibilityState(false)
+    // Android killed or the user disabled the service: nothing can be read or
+    // tapped until it is back, so make that visible on the dashboard.
+    DeviceLog.init(applicationContext)
+    DeviceLog.report("", "accessibility", "توقّفت خدمة الوصول — الأتمتة متوقفة حتى تُفعَّل من جديد", captureScreen = false)
   }
 
   // ---- primitives ---------------------------------------------------------

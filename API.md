@@ -606,6 +606,62 @@ Rejected orders (`422`) are never confirmed.
 
 ---
 
+## Bulk item on/off
+
+### POST /api/menu/items/availability/bulk/
+Turn several menu items on or off in one request. Devices receive **one**
+menu-sync message per connected app carrying the whole list (and host-side ADB
+runners one job per app from `/api/pending-syncs/`), so the items are toggled
+in a single run. Items already in the requested state are not re-sent.
+
+**Request** `{ "itemIds": [12, 15, 19], "available": false }`
+
+**Response `200`** `{ "updated": 3, "items": [ ...menu items... ] }`
+
+---
+
+## Device Error Logs
+
+Errors that happen **on a device** (the Android app or the host-side ADB
+runner) never reach the server on their own — a flow step that failed, an order
+that could not be sent, the accessibility service stopping, a crash. The device
+uploads them here, with the engine log lines that led up to the error and a text
+dump of the screen at that moment. A repeating error is throttled on the device:
+it is sent once, then again after 10 minutes with `count` = repeats in between.
+Reports made while offline are queued on the device and sent later.
+
+### POST /api/device-logs/
+Token-authenticated as the branch account; entries are stored under that branch.
+
+**Request** (snake_case)
+```json
+{
+  "source": "app",
+  "device": { "id": "a1b2c3", "model": "samsung SM-A155F", "os": "14", "app_version": "1.0.0" },
+  "entries": [
+    {
+      "platform": "toters",
+      "kind": "flow",
+      "message": "فشل التدفق · لم يظهر العنصر: order_card",
+      "occurred_at": 1760000000000,
+      "count": 1,
+      "context": ["12:00:01 [step] نقر · order_card"],
+      "screen": { "package": "com.toters.totersmerchant", "texts": ["الطلبات الحالية"] }
+    }
+  ]
+}
+```
+`source` is `app` or `adb`. `kind` is `flow`, `accessibility`, `crash` or `app`.
+At most 50 entries per request; entries older than 30 days are pruned.
+
+**Response `200`** `{ "stored": 1 }`
+
+### GET /api/dev/device-logs/
+Dev (superuser) only. Newest first, across all restaurants.
+Query: `restaurant=<slug>`, `source=app|adb`, `platform=<task slug>`, `limit=N` (max 300).
+
+---
+
 ## Common Error Format
 
 ```json
