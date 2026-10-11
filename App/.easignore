@@ -1,0 +1,22 @@
+# Used by EAS Build instead of .gitignore, so that google-services.json — which
+# is gitignored (it must never be committed) — IS uploaded with the build.
+# Keep this in step with .gitignore, minus that one line.
+node_modules/
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+android/
+ios/
+.kotlin/
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+.metro-health-check*
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+.DS_Store
